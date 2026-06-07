@@ -24,7 +24,7 @@ class DeviceTts(context: Context) : VoiceProvider {
     /** Invoked (on a binder thread) with the utterance id when speech finishes or errors. */
     var onSpeechDone: ((String?) -> Unit)? = null
 
-    private val tts = TextToSpeech(context.applicationContext) { status ->
+    private val tts: TextToSpeech = TextToSpeech(context.applicationContext) { status ->
         ready = status == TextToSpeech.SUCCESS
         if (ready) tts.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
             override fun onStart(utteranceId: String?) {}
