@@ -1,0 +1,12 @@
+# Copy to `local.properties` (Android Studio also writes sdk.dir here automatically).
+# Online providers are OPTIONAL — leave blank to run with offline OCR/translation/TTS only.
+
+# sdk.dir=/path/to/Android/Sdk
+
+# Online translation
+OPENAI_API_KEY=
+DEEPL_API_KEY=
+GOOGLE_API_KEY=
+
+# Online voice (TTS)
+ELEVENLABS_API_KEY=
