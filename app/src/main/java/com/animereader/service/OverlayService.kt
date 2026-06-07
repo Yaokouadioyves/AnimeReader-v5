@@ -44,7 +44,7 @@ import com.animereader.internal.ApiKeys
 import com.animereader.ocr.ScreenOcr
 import com.animereader.translate.Translators
 import com.animereader.tts.DeviceTts
-import com.animereader.tts.GeminiVoice
+import com.animereader.tts.EdgeVoice
 import com.animereader.tts.VoiceProvider
 import com.animereader.tts.Voices
 import com.animereader.ui.theme.resolvePalette
@@ -78,7 +78,7 @@ class OverlayService : LifecycleService() {
 
     private lateinit var ocr: ScreenOcr
     private lateinit var deviceTts: DeviceTts
-    private lateinit var geminiVoice: GeminiVoice
+    private lateinit var edgeVoice: EdgeVoice
     private val apiKeys = ApiKeys()
 
     private var projection: MediaProjection? = null
@@ -125,8 +125,8 @@ class OverlayService : LifecycleService() {
         ocr = ScreenOcr()
         deviceTts = DeviceTts(this)
         deviceTts.onSpeechDone = { id -> ui.post { onSpeechFinished(id) } }
-        geminiVoice = GeminiVoice({ settings.geminiKey }, deviceTts)
-        geminiVoice.onSpeechDone = { id -> ui.post { onSpeechFinished(id) } }
+        edgeVoice = EdgeVoice(this, deviceTts)
+        edgeVoice.onSpeechDone = { id -> ui.post { onSpeechFinished(id) } }
         lifecycleScope.launch { repo.settings.collect { settings = it; ui.post { if (overlaysAdded) updateDock() } } }
     }
 
@@ -428,7 +428,7 @@ class OverlayService : LifecycleService() {
 
     private fun stopSpeaking() {
         deviceTts.stop()
-        if (::geminiVoice.isInitialized) geminiVoice.stop()
+        if (::edgeVoice.isInitialized) edgeVoice.stop()
     }
 
     /** Re-read whatever is currently in the rectangle, ignoring the de-dup memory. */
@@ -653,7 +653,7 @@ class OverlayService : LifecycleService() {
         val toSpeak = translated ?: original
         if (s.ttsEnabled) {
             val provider: VoiceProvider =
-                if (s.voiceMethod == VoiceMethod.ONLINE && s.geminiKey.isNotBlank()) geminiVoice else deviceTts
+                if (s.voiceMethod == VoiceMethod.ONLINE) edgeVoice else deviceTts
             val langTag = if (translated != null) s.lang else "fr"
             currentSpeechId = toSpeak.hashCode().toString()
             provider.speak(toSpeak, langTag, s.speed, s.timbre)
@@ -739,7 +739,7 @@ class OverlayService : LifecycleService() {
         listOfNotNull(bubble, frame, moveHandle, sizeHandle, controls, captionBar, langPopup, langScrim).forEach { runCatching { wm.removeView(it) } }
         capturer?.stop()
         runCatching { projection?.stop() }
-        ocr.close(); deviceTts.shutdown(); geminiVoice.shutdown()
+        ocr.close(); deviceTts.shutdown(); edgeVoice.shutdown()
         super.onDestroy()
     }
 

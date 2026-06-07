@@ -74,4 +74,5 @@ dependencies {
     implementation(libs.mlkit.text.recognition)
     implementation(libs.mlkit.text.recognition.japanese)
     implementation(libs.mlkit.translate)
+    implementation(libs.okhttp)
 }
