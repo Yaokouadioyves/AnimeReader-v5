@@ -1,0 +1,28 @@
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <!-- poles -->
+    <path android:strokeColor="#C9962E" android:strokeWidth="4.5" android:strokeLineCap="round"
+        android:pathData="M35,32 L73,82" />
+    <path android:strokeColor="#C9962E" android:strokeWidth="4.5" android:strokeLineCap="round"
+        android:pathData="M73,32 L35,82" />
+    <!-- pole finials -->
+    <path android:fillColor="#C9962E" android:pathData="M35,32 m-4.5,0 a4.5,4.5 0 1,0 9,0 a4.5,4.5 0 1,0 -9,0" />
+    <path android:fillColor="#C9962E" android:pathData="M73,32 m-4.5,0 a4.5,4.5 0 1,0 9,0 a4.5,4.5 0 1,0 -9,0" />
+    <!-- right flag (behind) -->
+    <group android:rotation="13" android:pivotX="73" android:pivotY="35">
+        <path android:fillColor="#FFFFFF" android:strokeColor="#E6DCCF" android:strokeWidth="1"
+            android:pathData="M51,26 h20 a2,2 0 0 1 2,2 v14 a2,2 0 0 1 -2,2 h-20 z" />
+        <path android:fillColor="#E5342F"
+            android:pathData="M61,35 m-4.6,0 a4.6,4.6 0 1,0 9.2,0 a4.6,4.6 0 1,0 -9.2,0" />
+    </group>
+    <!-- left flag (front) -->
+    <group android:rotation="-13" android:pivotX="35" android:pivotY="35">
+        <path android:fillColor="#FFFFFF" android:strokeColor="#E6DCCF" android:strokeWidth="1"
+            android:pathData="M35,26 h20 a2,2 0 0 1 2,2 v14 a2,2 0 0 1 -2,2 h-20 a2,2 0 0 1 -2,-2 v-14 a2,2 0 0 1 2,-2 z" />
+        <path android:fillColor="#E5342F"
+            android:pathData="M45,35 m-4.6,0 a4.6,4.6 0 1,0 9.2,0 a4.6,4.6 0 1,0 -9.2,0" />
+    </group>
+</vector>
