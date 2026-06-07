@@ -84,11 +84,7 @@ fun SettingsSheet(
                     }
                 }
                 Divider()
-                Inline("Traduire automatiquement", "Avant la lecture à voix haute") {
-                    ARSwitch(settings.translateOn) { v -> onUpdate { it.copy(translateOn = v) } }
-                }
-                Divider()
-                Stacked("Langue cible", null) {
+                Stacked("Langue cible", "La traduction suit la langue choisie · « Original » = pas de traduction") {
                     LangGridMini(settings.lang) { code -> onUpdate { it.copy(lang = code) } }
                 }
             }

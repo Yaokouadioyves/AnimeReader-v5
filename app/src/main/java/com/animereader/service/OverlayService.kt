@@ -94,7 +94,10 @@ class OverlayService : LifecycleService() {
     private var playImg: ImageView? = null
     private var langBtn: TextView? = null
     private var methodDot: View? = null
-    private var transImg: ImageView? = null
+    private var voiceImg: ImageView? = null
+    private var langPopup: View? = null
+    private var langScrim: View? = null
+    private var langPopupOpen = false
 
     private var overlaysAdded = false
     private var expanded = false
@@ -188,6 +191,7 @@ class OverlayService : LifecycleService() {
     private fun onAccentInt(): Int = resolvePalette(settings.direction, settings.mode, settings.accent).onAccent.toArgb()
     private fun borderInt(): Int = resolvePalette(settings.direction, settings.mode, settings.accent).border.toArgb()
     private fun textMutedInt(): Int = resolvePalette(settings.direction, settings.mode, settings.accent).textMuted.toArgb()
+    private fun accentSoftInt(): Int = resolvePalette(settings.direction, settings.mode, settings.accent).accentSoft.toArgb()
     private fun methodColorInt(): Int {
         val p = resolvePalette(settings.direction, settings.mode, settings.accent)
         return if (settings.method == TranslationMethod.OFFLINE) p.offline.toArgb() else p.online.toArgb()
@@ -244,6 +248,11 @@ class OverlayService : LifecycleService() {
             wm.addView(it, lp)
         }
 
+        // Language dropdown views are built now but only attached to the window manager while
+        // open (a full-screen touchable scrim must not sit in the tree while closed).
+        langScrim = buildScrim()
+        langPopup = buildLangPopup()
+
         overlaysAdded = true
         setExpanded(false)
     }
@@ -265,7 +274,7 @@ class OverlayService : LifecycleService() {
         val dock = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
-            setPadding(dp(8), dp(8), dp(8), dp(8))
+            setPadding(dp(6), dp(6), dp(6), dp(6))
             background = GradientDrawable().apply {
                 cornerRadius = dp(999).toFloat(); setColor(elevInt()); setStroke(dp(1), borderInt())
             }
@@ -274,21 +283,23 @@ class OverlayService : LifecycleService() {
         // Play / pause — accent circle
         playImg = ImageView(this).apply {
             setImageResource(R.drawable.ic_play); setColorFilter(onAccentInt())
-            val p = dp(14); setPadding(p, p, p, p)
+            val p = dp(12); setPadding(p, p, p, p)
             background = GradientDrawable().apply { shape = GradientDrawable.OVAL; setColor(accentInt()) }
         }
         dock.addView(FrameLayout(this).apply {
-            layoutParams = LinearLayout.LayoutParams(dp(50), dp(50))
-            addView(playImg, FrameLayout.LayoutParams(dp(50), dp(50)))
+            layoutParams = LinearLayout.LayoutParams(dp(44), dp(44))
+            addView(playImg, FrameLayout.LayoutParams(dp(44), dp(44)))
             setOnClickListener { togglePlay() }
         })
+        // re-read the current bubble on demand (bypasses the de-dup)
+        dock.addView(dockIcon(R.drawable.ic_replay, textMutedInt()) { replayCurrent() })
         dock.addView(dockSep())
-        // Language pill — method dot + tag + chevron
+        // Language pill — tap opens the language dropdown
         val langPill = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL
-            setPadding(dp(12), dp(8), dp(10), dp(8))
+            setPadding(dp(11), dp(7), dp(9), dp(7))
             background = GradientDrawable().apply { cornerRadius = dp(999).toFloat(); setColor(AColor.TRANSPARENT) }
-            setOnClickListener { cycleLanguage() }
+            setOnClickListener { toggleLangPopup() }
         }
         methodDot = View(this).apply {
             layoutParams = LinearLayout.LayoutParams(dp(7), dp(7)).apply { rightMargin = dp(7) }
@@ -303,27 +314,125 @@ class OverlayService : LifecycleService() {
         langPill.addView(langBtn)
         langPill.addView(ImageView(this).apply {
             setImageResource(R.drawable.ic_chevron_down); setColorFilter(textMutedInt())
-            layoutParams = LinearLayout.LayoutParams(dp(16), dp(16)).apply { leftMargin = dp(3) }
+            layoutParams = LinearLayout.LayoutParams(dp(15), dp(15)).apply { leftMargin = dp(2) }
         })
         dock.addView(langPill)
-        // Translate toggle + open-app
-        transImg = dockIcon(R.drawable.ic_translate, if (settings.translateOn) accentInt() else textMutedInt()) { toggleTranslate() }
-        dock.addView(transImg)
-        dock.addView(dockIcon(R.drawable.ic_settings, textMutedInt()) { openApp() })
+        // Voice on/off — off = translate-only (no audio)
+        voiceImg = dockIcon(
+            if (settings.ttsEnabled) R.drawable.ic_volume else R.drawable.ic_volume_off,
+            if (settings.ttsEnabled) accentInt() else textMutedInt(),
+        ) { toggleVoice() }
+        dock.addView(voiceImg)
         return dock
     }
 
     private fun dockSep() = View(this).apply {
-        layoutParams = LinearLayout.LayoutParams(dp(1), dp(28)).apply { leftMargin = dp(4); rightMargin = dp(4) }
+        layoutParams = LinearLayout.LayoutParams(dp(1), dp(26)).apply { leftMargin = dp(3); rightMargin = dp(3) }
         setBackgroundColor(borderInt())
     }
 
     private fun dockIcon(res: Int, tint: Int, onClick: () -> Unit): ImageView = ImageView(this).apply {
         setImageResource(res); setColorFilter(tint)
-        val p = dp(12); setPadding(p, p, p, p)
-        layoutParams = LinearLayout.LayoutParams(dp(46), dp(46))
+        val p = dp(10); setPadding(p, p, p, p)
+        layoutParams = LinearLayout.LayoutParams(dp(40), dp(40))
         background = GradientDrawable().apply { shape = GradientDrawable.OVAL; setColor(AColor.TRANSPARENT) }
         setOnClickListener { onClick() }
+    }
+
+    // ── Language dropdown (popover above the dock) ──
+    private fun buildLangPopup(): View {
+        val card = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(6), dp(6), dp(6), dp(6))
+            background = GradientDrawable().apply {
+                cornerRadius = dp(16).toFloat(); setColor(elevInt()); setStroke(dp(1), borderInt())
+            }
+            elevation = dp(12).toFloat()
+            visibility = View.GONE
+        }
+        Catalog.languages.forEach { l ->
+            val row = LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL
+                setPadding(dp(12), dp(10), dp(20), dp(10))
+                background = GradientDrawable().apply { cornerRadius = dp(11).toFloat(); setColor(AColor.TRANSPARENT) }
+                tag = l.code
+                setOnClickListener { setLang(l.code) }
+            }
+            row.addView(TextView(this).apply {
+                text = l.tag; setWidth(dp(34))
+                setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f); typeface = android.graphics.Typeface.DEFAULT_BOLD
+            })
+            row.addView(TextView(this).apply {
+                text = if (l.code == "fr") "Original" else l.label
+                setTextSize(TypedValue.COMPLEX_UNIT_SP, 13.5f)
+            })
+            card.addView(row)
+        }
+        return card
+    }
+
+    private fun buildScrim(): View = View(this).apply {
+        setBackgroundColor(AColor.argb(36, 0, 0, 0))
+        visibility = View.GONE
+        setOnClickListener { closeLangPopup() }
+    }
+
+    private fun refreshLangPopup() {
+        val card = langPopup as? LinearLayout ?: return
+        for (i in 0 until card.childCount) {
+            val row = card.getChildAt(i) as? LinearLayout ?: continue
+            val on = (row.tag as? String) == settings.lang
+            (row.background as? GradientDrawable)?.setColor(if (on) accentSoftInt() else AColor.TRANSPARENT)
+            (row.getChildAt(0) as? TextView)?.setTextColor(if (on) accentInt() else textInt())
+            (row.getChildAt(1) as? TextView)?.setTextColor(if (on) accentInt() else textMutedInt())
+        }
+    }
+
+    private fun toggleLangPopup() { if (langPopupOpen) closeLangPopup() else openLangPopup() }
+    private fun openLangPopup() {
+        if (langPopupOpen) return
+        val scrim = langScrim ?: return
+        val pop = langPopup ?: return
+        langPopupOpen = true
+        refreshLangPopup()
+        scrim.visibility = View.VISIBLE; pop.visibility = View.VISIBLE
+        runCatching {
+            wm.addView(scrim, overlayParams(WindowManager.LayoutParams.MATCH_PARENT, WindowManager.LayoutParams.MATCH_PARENT, touchable = true))
+            wm.addView(pop, overlayParams(WindowManager.LayoutParams.WRAP_CONTENT, WindowManager.LayoutParams.WRAP_CONTENT, touchable = true).apply {
+                gravity = Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL; y = dp(84)
+            })
+        }
+    }
+    private fun closeLangPopup() {
+        if (!langPopupOpen) return
+        langPopupOpen = false
+        runCatching { langScrim?.let { wm.removeView(it) } }
+        runCatching { langPopup?.let { wm.removeView(it) } }
+    }
+
+    private fun setLang(code: String) {
+        lifecycleScope.launch { repo.update { it.copy(lang = code) } }
+        closeLangPopup()
+    }
+
+    private fun toggleVoice() {
+        lifecycleScope.launch { repo.update { it.copy(ttsEnabled = !it.ttsEnabled) } }
+        deviceTts.stop()
+    }
+
+    /** Re-read whatever is currently in the rectangle, ignoring the de-dup memory. */
+    private fun replayCurrent() {
+        lifecycleScope.launch(Dispatchers.Default) {
+            val bmp = capturer?.captureRegion(Rect(rx, ry, rx + rw, ry + rh)) ?: return@launch
+            val raw = runCatching { ocr.recognize(bmp) }.getOrDefault(""); bmp.recycle()
+            if (raw.isNotBlank()) {
+                val norm = normalizeText(raw)
+                if (norm !in recentSpoken) {
+                    recentSpoken.addLast(norm); while (recentSpoken.size > 8) recentSpoken.removeFirst()
+                }
+                handleRecognized(raw)
+            }
+        }
     }
 
     /** Subtitle bar: dark high-contrast scrim, white translation (translation-only),
@@ -443,7 +552,7 @@ class OverlayService : LifecycleService() {
         val vis = if (value) View.VISIBLE else View.GONE
         frame?.visibility = vis; moveHandle?.visibility = vis; sizeHandle?.visibility = vis; controls?.visibility = vis
         if (value) { playing = true; wake(); startLoop(); updateDock() }
-        else { playing = false; stopLoop(); deviceTts.stop(); ui.removeCallbacks(hideCaption); captionBar?.visibility = View.GONE }
+        else { playing = false; stopLoop(); deviceTts.stop(); ui.removeCallbacks(hideCaption); captionBar?.visibility = View.GONE; closeLangPopup() }
     }
 
     private fun togglePlay() {
@@ -452,23 +561,14 @@ class OverlayService : LifecycleService() {
         updateDock()
     }
 
-    private fun cycleLanguage() {
-        val codes = Catalog.languages.map { it.code }
-        val next = codes[(codes.indexOf(settings.lang) + 1) % codes.size]
-        lifecycleScope.launch { repo.update { it.copy(lang = next) } }
-        ui.postDelayed({ updateDock() }, 60)
-    }
-
-    private fun toggleTranslate() {
-        lifecycleScope.launch { repo.update { it.copy(translateOn = !it.translateOn) } }
-    }
-
     private fun updateDock() {
         playImg?.setImageResource(if (playing) R.drawable.ic_pause else R.drawable.ic_play)
         playImg?.setColorFilter(onAccentInt())
         langBtn?.text = Catalog.lang(settings.lang).tag
         methodDot?.background = GradientDrawable().apply { shape = GradientDrawable.OVAL; setColor(methodColorInt()) }
-        transImg?.setColorFilter(if (settings.translateOn) accentInt() else textMutedInt())
+        voiceImg?.setImageResource(if (settings.ttsEnabled) R.drawable.ic_volume else R.drawable.ic_volume_off)
+        voiceImg?.setColorFilter(if (settings.ttsEnabled) accentInt() else textMutedInt())
+        if (langPopupOpen) refreshLangPopup()
     }
 
     // ── Capture → OCR → translate → speak ──
@@ -531,7 +631,7 @@ class OverlayService : LifecycleService() {
     private suspend fun handleRecognized(original: String) {
         val s = settings
         var translated: String? = null
-        if (s.translateOn && s.lang != "fr") {
+        if (s.lang != "fr") {
             translated = runCatching {
                 Translators.create(s.method, s.provider, apiKeys).translate(original, s.lang)
             }.getOrElse {
@@ -624,7 +724,7 @@ class OverlayService : LifecycleService() {
     override fun onDestroy() {
         _running.value = false
         stopLoop()
-        listOfNotNull(bubble, frame, moveHandle, sizeHandle, controls, captionBar).forEach { runCatching { wm.removeView(it) } }
+        listOfNotNull(bubble, frame, moveHandle, sizeHandle, controls, captionBar, langPopup, langScrim).forEach { runCatching { wm.removeView(it) } }
         capturer?.stop()
         runCatching { projection?.stop() }
         ocr.close(); deviceTts.shutdown()
