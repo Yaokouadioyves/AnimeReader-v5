@@ -168,7 +168,7 @@ fun SettingsSheet(
                         modifier = Modifier.fillMaxWidth(),
                     )
                     Text(
-                        "Gratuite sur aistudio.google.com · stockée sur l'appareil · active l'OCR + traduction ET la voix neurale en ligne.",
+                        "Gratuite sur aistudio.google.com · stockée sur l'appareil · pour l'OCR + traduction en ligne. La voix en ligne (edge-tts) ne nécessite pas de clé.",
                         color = pal.textMuted, fontSize = fs(11.5f),
                         modifier = Modifier.padding(top = 8.dp),
                     )
