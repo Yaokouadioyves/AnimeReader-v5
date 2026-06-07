@@ -16,6 +16,40 @@ object GeminiClient {
 
     private const val BASE = "https://generativelanguage.googleapis.com/v1beta/models"
     const val TTS_MODEL = "gemini-2.5-flash-preview-tts"
+    const val VISION_MODEL = "gemini-2.5-flash"
+
+    /**
+     * Manga OCR + translation in one vision call. Returns (original, translation) or null on error.
+     * [imageJpeg] is the captured region; [targetLanguage] is a natural language name (e.g. "anglais").
+     */
+    fun ocrTranslate(apiKey: String, imageJpeg: ByteArray, targetLanguage: String): Pair<String, String>? {
+        val url = URL("$BASE/$VISION_MODEL:generateContent?key=$apiKey")
+        val conn = (url.openConnection() as HttpURLConnection).apply {
+            requestMethod = "POST"; doOutput = true
+            setRequestProperty("Content-Type", "application/json")
+            connectTimeout = 15000; readTimeout = 30000
+        }
+        val b64 = Base64.encodeToString(imageJpeg, Base64.NO_WRAP)
+        val prompt =
+            "Tu es un moteur OCR de manga expert (japonais vertical, lettrage stylisé, furigana). " +
+                "Lis uniquement le texte des bulles dans cette image, corrige les erreurs d'OCR, puis " +
+                "traduis en $targetLanguage de manière naturelle et fidèle au ton. Réponds STRICTEMENT en JSON " +
+                "{\"original\":\"<texte source>\",\"translation\":\"<traduction>\"}. Aucun texte lisible -> chaînes vides."
+        val body = JSONObject().apply {
+            put("contents", JSONArray().put(JSONObject().put("parts", JSONArray()
+                .put(JSONObject().put("inlineData", JSONObject().put("mimeType", "image/jpeg").put("data", b64)))
+                .put(JSONObject().put("text", prompt)))))
+            put("generationConfig", JSONObject().put("responseMimeType", "application/json").put("temperature", 0.2))
+        }
+        conn.outputStream.use { it.write(body.toString().toByteArray(Charsets.UTF_8)) }
+        if (conn.responseCode != 200) { conn.disconnect(); throw IOException("Gemini OCR HTTP ${conn.responseCode}") }
+        val resp = conn.inputStream.bufferedReader().use { it.readText() }
+        conn.disconnect()
+        val text = JSONObject(resp).getJSONArray("candidates").getJSONObject(0)
+            .getJSONObject("content").getJSONArray("parts").getJSONObject(0).getString("text")
+        val obj = JSONObject(text)
+        return obj.optString("original", "") to obj.optString("translation", "")
+    }
 
     /** Output is signed 16-bit PCM, mono, 24 kHz. */
     const val TTS_SAMPLE_RATE = 24000

@@ -41,6 +41,7 @@ import com.animereader.data.SettingsRepository
 import com.animereader.data.TranslationMethod
 import com.animereader.data.VoiceMethod
 import com.animereader.internal.ApiKeys
+import com.animereader.internal.GeminiClient
 import com.animereader.ocr.ScreenOcr
 import com.animereader.translate.Translators
 import com.animereader.tts.DeviceTts
@@ -639,22 +640,43 @@ class OverlayService : LifecycleService() {
 
     private fun stopLoop() { captureJob?.cancel(); captureJob = null }
 
-    private suspend fun handleRecognized(original: String) {
+    private suspend fun handleRecognized(mlkitText: String) {
         val s = settings
+        var original = mlkitText
         var translated: String? = null
-        if (s.lang != "fr") {
-            translated = runCatching {
-                Translators.create(s.method, s.provider, apiKeys).translate(original, s.lang)
-            }.getOrElse {
-                // Online stub/unconfigured → fall back to offline ML Kit.
-                runCatching { Translators.create(TranslationMethod.OFFLINE, s.provider, apiKeys).translate(original, s.lang) }.getOrNull()
+        val useGemini = s.method == TranslationMethod.ONLINE && s.geminiKey.isNotBlank()
+
+        if (useGemini) {
+            // Re-capture the region and let Gemini vision do OCR + translation in one call
+            // (far better on stylised / deformed manga lettering than on-device ML Kit).
+            val jpeg = capturer?.captureRegion(Rect(rx, ry, rx + rw, ry + rh))?.let { bmp ->
+                val out = java.io.ByteArrayOutputStream()
+                bmp.compress(android.graphics.Bitmap.CompressFormat.JPEG, 85, out)
+                bmp.recycle(); out.toByteArray()
+            }
+            if (jpeg != null) {
+                val res = withContext(Dispatchers.IO) {
+                    runCatching { GeminiClient.ocrTranslate(s.geminiKey, jpeg, langName(s.lang)) }.getOrNull()
+                }
+                if (res != null && res.first.isNotBlank()) {
+                    original = res.first
+                    translated = res.second.ifBlank { null }
+                }
             }
         }
+        // Offline ML Kit translation — primary path when offline, and the fallback when Gemini
+        // returned text but no translation.
+        if (translated == null && s.lang != "fr") {
+            translated = runCatching {
+                Translators.create(TranslationMethod.OFFLINE, s.provider, apiKeys).translate(original, s.lang)
+            }.getOrNull()
+        }
+
         val toSpeak = translated ?: original
         if (s.ttsEnabled) {
             val provider: VoiceProvider =
                 if (s.voiceMethod == VoiceMethod.ONLINE) edgeVoice else deviceTts
-            val langTag = if (translated != null) s.lang else "fr"
+            val langTag = if (translated != null) s.lang else detectSpokenLang(original)
             currentSpeechId = toSpeak.hashCode().toString()
             provider.speak(toSpeak, langTag, s.speed, s.timbre)
         }
@@ -666,10 +688,20 @@ class OverlayService : LifecycleService() {
                 translated = translated,
                 langTag = if (translated != null) s.lang.uppercase() else null,
                 method = if (translated != null) s.method else null,
-                providerName = if (translated != null && s.method == TranslationMethod.ONLINE) s.provider.displayName else if (translated != null) "ML Kit" else null,
+                providerName = if (translated == null) null else if (useGemini) "Gemini" else "ML Kit",
             )
         )
     }
+
+    /** Natural language name for the Gemini prompt target. */
+    private fun langName(code: String): String = when (code) {
+        "fr" -> "français"; "en" -> "anglais"; "es" -> "espagnol"; "ja" -> "japonais"; "pt" -> "portugais"
+        else -> "anglais"
+    }
+
+    /** When reading untranslated source, pick a voice language: CJK -> Japanese, else French. */
+    private fun detectSpokenLang(text: String): String =
+        if (text.any { it.code in 0x3000..0x9FFF || it.code in 0xFF00..0xFFEF }) "ja" else "fr"
 
     private fun showCaption(original: String, translated: String?) {
         val main = captionMain ?: return
