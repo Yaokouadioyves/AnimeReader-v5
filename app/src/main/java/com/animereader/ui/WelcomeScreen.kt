@@ -21,7 +21,6 @@ import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
@@ -65,17 +64,12 @@ fun WelcomeScreen(
             horizontalAlignment = Alignment.CenterHorizontally,
             verticalArrangement = Arrangement.Center,
         ) {
-            // Brand mark — crisp vector of the crossed-flags logo on the brand pink
-            Box(
-                Modifier.size(84.dp).clip(RoundedCornerShape(24.dp)).background(Color(0xFFF85876)),
-                contentAlignment = Alignment.Center,
-            ) {
-                Image(
-                    painter = painterResource(R.drawable.ic_flags),
-                    contentDescription = "AnimeReader",
-                    modifier = Modifier.size(66.dp),
-                )
-            }
+            // Brand mark — high-res 3D crossed-flags on the brand pink (extracted logo)
+            Image(
+                painter = painterResource(R.drawable.logo_fg),
+                contentDescription = "AnimeReader",
+                modifier = Modifier.size(84.dp).clip(RoundedCornerShape(24.dp)),
+            )
             Spacer(Modifier.height(26.dp))
             Text("Lisez vos mangas\nles yeux fermés", color = pal.text, fontSize = fs(30f),
                 fontWeight = FontWeight.Bold, fontFamily = style.displayFamily, textAlign = TextAlign.Center)
