@@ -55,9 +55,9 @@ fun SettingsSheet(
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
 
     val methodSub = if (settings.method == TranslationMethod.OFFLINE) "ML Kit — sur l'appareil"
-        else "IA cloud — ${settings.provider.displayName}"
+        else "IA cloud — Gemini (clé requise)"
     val voiceSub = if (settings.voiceMethod == VoiceMethod.OFFLINE) "Moteur TTS de l'appareil"
-        else "Voix IA — ${settings.voiceProvider.displayName}"
+        else "edge-tts — voix Microsoft neurale"
 
     ModalBottomSheet(onDismissRequest = onClose, sheetState = sheetState, containerColor = pal.elev) {
         Column(
@@ -78,12 +78,6 @@ fun SettingsSheet(
                         options = listOf("Hors-ligne" to TranslationMethod.OFFLINE, "IA en ligne" to TranslationMethod.ONLINE),
                         selected = settings.method,
                     ) { v -> onUpdate { it.copy(method = v) } }
-                    if (settings.method == TranslationMethod.ONLINE) {
-                        Spacer(Modifier.size(10.dp))
-                        ProviderRow(TextProvider.entries, settings.provider, { it.displayName }, { it.org }) { v ->
-                            onUpdate { s -> s.copy(provider = v) }
-                        }
-                    }
                 }
                 Divider()
                 Stacked("Langue cible", "La traduction suit la langue choisie · « Original » = pas de traduction") {
@@ -104,12 +98,6 @@ fun SettingsSheet(
                             options = listOf("Hors-ligne" to VoiceMethod.OFFLINE, "IA en ligne" to VoiceMethod.ONLINE),
                             selected = settings.voiceMethod,
                         ) { v -> onUpdate { it.copy(voiceMethod = v) } }
-                        if (settings.voiceMethod == VoiceMethod.ONLINE) {
-                            Spacer(Modifier.size(10.dp))
-                            ProviderRow(VoiceProviderId.entries, settings.voiceProvider, { it.displayName }, { it.org }) { v ->
-                                onUpdate { s -> s.copy(voiceProvider = v) }
-                            }
-                        }
                     }
                     Divider()
                     Inline("Vitesse de lecture", null) {

@@ -109,6 +109,7 @@ class OverlayService : LifecycleService() {
     private var playing = false
     @Volatile private var interacting = false
     @Volatile private var currentSpeechId: String? = null
+    private var lastOcrErr = 0L
     private val recentSpoken = ArrayDeque<String>()
     private val stableFrames = 2
 
@@ -131,7 +132,17 @@ class OverlayService : LifecycleService() {
         edgeVoice.onError = { msg ->
             ui.post { android.widget.Toast.makeText(this, "Voix en ligne ⚠️ $msg", android.widget.Toast.LENGTH_LONG).show() }
         }
-        lifecycleScope.launch { repo.settings.collect { settings = it; ui.post { if (overlaysAdded) updateDock() } } }
+        lifecycleScope.launch {
+            repo.settings.collect { newS ->
+                val prevLang = settings.lang
+                settings = newS
+                ui.post { if (overlaysAdded) updateDock() }
+                // Changing the target language re-translates the current bubble immediately.
+                if (overlaysAdded && expanded && playing && prevLang != newS.lang) {
+                    replayCurrent()
+                }
+            }
+        }
     }
 
     /** When voice reading is on, hide the subtitle the moment the matching utterance finishes. */
@@ -442,8 +453,8 @@ class OverlayService : LifecycleService() {
             val raw = runCatching { ocr.recognize(bmp) }.getOrDefault(""); bmp.recycle()
             if (raw.isNotBlank()) {
                 val norm = normalizeText(raw)
-                if (norm !in recentSpoken) {
-                    recentSpoken.addLast(norm); while (recentSpoken.size > 8) recentSpoken.removeFirst()
+                synchronized(recentSpoken) {
+                    if (norm !in recentSpoken) { recentSpoken.addLast(norm); while (recentSpoken.size > 8) recentSpoken.removeFirst() }
                 }
                 handleRecognized(raw)
             }
@@ -606,8 +617,7 @@ class OverlayService : LifecycleService() {
                         // Read only once the OCR has settled (same text across captures) and the
                         // line isn't a repeat/continuation of something we just read.
                         if (stable == stableFrames && !isRecentDuplicate(norm)) {
-                            recentSpoken.addLast(norm)
-                            while (recentSpoken.size > 8) recentSpoken.removeFirst()
+                            synchronized(recentSpoken) { recentSpoken.addLast(norm); while (recentSpoken.size > 8) recentSpoken.removeFirst() }
                             handleRecognized(raw)
                         }
                     }
@@ -622,7 +632,8 @@ class OverlayService : LifecycleService() {
         s.lowercase().replace(Regex("[\\s\\p{Punct}　・…]+"), "")
 
     private fun isRecentDuplicate(norm: String): Boolean {
-        for (prev in recentSpoken) {
+        val snapshot = synchronized(recentSpoken) { recentSpoken.toList() }
+        for (prev in snapshot) {
             if (norm == prev) return true
             val shorter = if (norm.length <= prev.length) norm else prev
             val longer = if (norm.length <= prev.length) prev else norm
@@ -658,12 +669,22 @@ class OverlayService : LifecycleService() {
                 bmp.recycle(); out.toByteArray()
             }
             if (jpeg != null) {
-                val res = withContext(Dispatchers.IO) {
-                    runCatching { GeminiClient.ocrTranslate(s.geminiKey, jpeg, langName(s.lang)) }.getOrNull()
+                val r = withContext(Dispatchers.IO) {
+                    runCatching { GeminiClient.ocrTranslate(s.geminiKey, jpeg, langName(s.lang)) }
                 }
+                r.exceptionOrNull()?.let { e ->
+                    val now = System.currentTimeMillis()
+                    if (now - lastOcrErr > 5000) {
+                        lastOcrErr = now
+                        ui.post { android.widget.Toast.makeText(this@OverlayService, "OCR Gemini ⚠️ ${e.message}", android.widget.Toast.LENGTH_SHORT).show() }
+                    }
+                }
+                val res = r.getOrNull()
                 if (res != null && res.first.isNotBlank()) {
                     original = res.first
                     translated = res.second.ifBlank { null }
+                    // Guard against the model echoing the source instead of translating.
+                    if (translated != null && translated.equals(original, ignoreCase = true)) translated = null
                 }
             }
         }
