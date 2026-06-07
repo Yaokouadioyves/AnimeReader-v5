@@ -23,6 +23,9 @@ class GeminiVoice(
     /** Invoked with the utterance id when playback finishes (for caption sync). */
     var onSpeechDone: ((String?) -> Unit)? = null
 
+    /** Invoked (diagnostic) with the failure reason when Gemini TTS fails and we fall back. */
+    var onError: ((String) -> Unit)? = null
+
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
     @Volatile private var generation = 0
     @Volatile private var track: AudioTrack? = null
@@ -38,11 +41,18 @@ class GeminiVoice(
             val at = createTrack()
             track = at
             runCatching { at.play() }
-            val ok = runCatching {
+            var wrote = 0L
+            val result = runCatching {
                 GeminiClient.ttsStream(key, prompt, voiceFor(timbre), { generation == myGen }) { pcm ->
-                    if (generation == myGen) runCatching { at.write(pcm, 0, pcm.size) }
+                    if (generation == myGen) { runCatching { at.write(pcm, 0, pcm.size) }; wrote += pcm.size }
                 }
-            }.onFailure { Log.w(TAG, "Gemini TTS failed: ${it.message}") }.isSuccess
+            }
+            result.onFailure {
+                Log.w(TAG, "Gemini TTS failed: ${it.message}")
+                onError?.invoke(it.message ?: it.javaClass.simpleName)
+            }
+            val ok = result.isSuccess && wrote > 0
+            if (result.isSuccess && wrote == 0L) onError?.invoke("réponse audio vide (modèle/quota TTS ?)")
             if (generation == myGen) {
                 runCatching { at.stop() }; runCatching { at.release() }
                 if (track === at) track = null

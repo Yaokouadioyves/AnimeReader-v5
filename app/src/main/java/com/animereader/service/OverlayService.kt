@@ -109,6 +109,7 @@ class OverlayService : LifecycleService() {
     private var playing = false
     @Volatile private var interacting = false
     @Volatile private var currentSpeechId: String? = null
+    private var voiceWarned = false
     private val recentSpoken = ArrayDeque<String>()
     private val stableFrames = 2
 
@@ -128,6 +129,9 @@ class OverlayService : LifecycleService() {
         deviceTts.onSpeechDone = { id -> ui.post { onSpeechFinished(id) } }
         geminiVoice = GeminiVoice({ settings.geminiKey }, deviceTts)
         geminiVoice.onSpeechDone = { id -> ui.post { onSpeechFinished(id) } }
+        geminiVoice.onError = { msg ->
+            ui.post { android.widget.Toast.makeText(this, "Voix Gemini ⚠️ $msg", android.widget.Toast.LENGTH_LONG).show() }
+        }
         lifecycleScope.launch { repo.settings.collect { settings = it; ui.post { if (overlaysAdded) updateDock() } } }
     }
 
@@ -674,8 +678,13 @@ class OverlayService : LifecycleService() {
 
         val toSpeak = translated ?: original
         if (s.ttsEnabled) {
+            val online = s.voiceMethod == VoiceMethod.ONLINE
+            if (online && s.geminiKey.isBlank() && !voiceWarned) {
+                voiceWarned = true
+                ui.post { android.widget.Toast.makeText(this@OverlayService, "Voix en ligne : aucune clé Gemini → voix de l'appareil", android.widget.Toast.LENGTH_LONG).show() }
+            }
             val provider: VoiceProvider =
-                if (s.voiceMethod == VoiceMethod.ONLINE && s.geminiKey.isNotBlank()) geminiVoice else deviceTts
+                if (online && s.geminiKey.isNotBlank()) geminiVoice else deviceTts
             val langTag = if (translated != null) s.lang else detectSpokenLang(original)
             currentSpeechId = toSpeak.hashCode().toString()
             provider.speak(toSpeak, langTag, s.speed, s.timbre)
