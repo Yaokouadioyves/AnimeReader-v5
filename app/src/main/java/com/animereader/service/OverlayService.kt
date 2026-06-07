@@ -99,8 +99,10 @@ class OverlayService : LifecycleService() {
     private var overlaysAdded = false
     private var expanded = false
     private var playing = false
-    private var lastSpoken = ""
+    @Volatile private var interacting = false
     @Volatile private var currentSpeechId: String? = null
+    private val recentSpoken = ArrayDeque<String>()
+    private val stableFrames = 2
 
     // Geometry (screen pixels)
     private var rx = 0; private var ry = 0; private var rw = 0; private var rh = 0
@@ -391,11 +393,12 @@ class OverlayService : LifecycleService() {
         var sx = 0; var sy = 0; var rawX = 0f; var rawY = 0f
         handle.setOnTouchListener { _, e ->
             when (e.action) {
-                MotionEvent.ACTION_DOWN -> { sx = rx; sy = ry; rawX = e.rawX; rawY = e.rawY; wake(); true }
+                MotionEvent.ACTION_DOWN -> { sx = rx; sy = ry; rawX = e.rawX; rawY = e.rawY; interacting = true; wake(); true }
                 MotionEvent.ACTION_MOVE -> {
                     rx = sx + (e.rawX - rawX).toInt(); ry = sy + (e.rawY - rawY).toInt()
                     syncRect(); wake(); true
                 }
+                MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> { ui.postDelayed({ interacting = false }, 350); true }
                 else -> true
             }
         }
@@ -405,12 +408,13 @@ class OverlayService : LifecycleService() {
         var sw = 0; var sh = 0; var rawX = 0f; var rawY = 0f
         handle.setOnTouchListener { _, e ->
             when (e.action) {
-                MotionEvent.ACTION_DOWN -> { sw = rw; sh = rh; rawX = e.rawX; rawY = e.rawY; wake(); true }
+                MotionEvent.ACTION_DOWN -> { sw = rw; sh = rh; rawX = e.rawX; rawY = e.rawY; interacting = true; wake(); true }
                 MotionEvent.ACTION_MOVE -> {
                     rw = (sw + (e.rawX - rawX).toInt()).coerceAtLeast(dp(120))
                     rh = (sh + (e.rawY - rawY).toInt()).coerceAtLeast(dp(70))
                     syncRect(); wake(); true
                 }
+                MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> { ui.postDelayed({ interacting = false }, 350); true }
                 else -> true
             }
         }
@@ -470,24 +474,61 @@ class OverlayService : LifecycleService() {
     // ── Capture → OCR → translate → speak ──
     private fun startLoop() {
         if (captureJob?.isActive == true) return
+        recentSpoken.clear()
         captureJob = lifecycleScope.launch(Dispatchers.Default) {
+            var pending = ""
+            var stable = 0
             while (isActive && expanded && playing) {
+                if (interacting) { delay(150); continue }   // don't read while the frame is moving
                 val region = Rect(rx, ry, rx + rw, ry + rh)
                 val bmp = capturer?.captureRegion(region)
                 if (bmp != null) {
-                    val text = runCatching { ocr.recognize(bmp) }.getOrDefault("")
+                    val raw = runCatching { ocr.recognize(bmp) }.getOrDefault("")
                     bmp.recycle()
-                    if (text.isNotBlank() && text != lastSpoken) handleRecognized(text)
+                    val norm = normalizeText(raw)
+                    if (norm.length >= 2) {
+                        if (norm == pending) stable++ else { pending = norm; stable = 1 }
+                        // Read only once the OCR has settled (same text across captures) and the
+                        // line isn't a repeat/continuation of something we just read.
+                        if (stable == stableFrames && !isRecentDuplicate(norm)) {
+                            recentSpoken.addLast(norm)
+                            while (recentSpoken.size > 8) recentSpoken.removeFirst()
+                            handleRecognized(raw)
+                        }
+                    }
                 }
                 delay((settings.captureInterval * 1000).toLong().coerceAtLeast(400))
             }
         }
     }
 
+    /** Lowercase, strip whitespace/punctuation (keeps CJK) so dedup ignores cosmetic OCR diffs. */
+    private fun normalizeText(s: String): String =
+        s.lowercase().replace(Regex("[\\s\\p{Punct}　・…]+"), "")
+
+    private fun isRecentDuplicate(norm: String): Boolean {
+        for (prev in recentSpoken) {
+            if (norm == prev) return true
+            val shorter = if (norm.length <= prev.length) norm else prev
+            val longer = if (norm.length <= prev.length) prev else norm
+            if (longer.contains(shorter) && shorter.length >= longer.length * 0.6) return true
+            if (bigramSimilarity(norm, prev) >= 0.82) return true
+        }
+        return false
+    }
+
+    private fun bigramSimilarity(a: String, b: String): Double {
+        if (a.length < 2 || b.length < 2) return if (a == b) 1.0 else 0.0
+        fun bigrams(s: String) = (0 until s.length - 1).mapTo(HashSet()) { s.substring(it, it + 2) }
+        val sa = bigrams(a); val sb = bigrams(b)
+        val inter = sa.count { it in sb }
+        val union = sa.size + sb.size - inter
+        return if (union == 0) 0.0 else inter.toDouble() / union
+    }
+
     private fun stopLoop() { captureJob?.cancel(); captureJob = null }
 
     private suspend fun handleRecognized(original: String) {
-        lastSpoken = original
         val s = settings
         var translated: String? = null
         if (s.translateOn && s.lang != "fr") {
