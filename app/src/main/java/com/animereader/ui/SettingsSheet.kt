@@ -22,6 +22,7 @@ import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.animereader.data.Catalog
@@ -174,7 +175,8 @@ private fun <T> Segment(options: List<Pair<String, T>>, selected: T, compact: Bo
             val on = value == selected
             Box(
                 Modifier.weight(1f)
-                    .background(if (on) pal.elev else androidx.compose.ui.graphics.Color.Transparent, RoundedCornerShape(999.dp))
+                    .clip(RoundedCornerShape(999.dp))
+                    .background(if (on) pal.elev else androidx.compose.ui.graphics.Color.Transparent)
                     .clickable { onSelect(value) }
                     .padding(vertical = if (compact) 7.dp else 9.dp),
                 contentAlignment = Alignment.Center,
@@ -196,7 +198,8 @@ private fun <T> ProviderRow(
             val on = item == selected
             Column(
                 Modifier.weight(1f)
-                    .background(if (on) pal.online.copy(alpha = 0.08f) else pal.surface2, RoundedCornerShape(style.radiusSm))
+                    .clip(RoundedCornerShape(style.radiusSm))
+                    .background(if (on) pal.online.copy(alpha = 0.08f) else pal.surface2)
                     .border(1.5.dp, if (on) pal.online.copy(alpha = 0.45f) else pal.border, RoundedCornerShape(style.radiusSm))
                     .clickable { onSelect(item) }
                     .padding(vertical = 11.dp, horizontal = 4.dp),
@@ -217,7 +220,8 @@ private fun LangGrid(selected: String, onSelect: (String) -> Unit) {
             val on = l.code == selected
             Column(
                 Modifier.weight(1f)
-                    .background(if (on) pal.accentSoft else pal.surface2, RoundedCornerShape(style.radiusSm))
+                    .clip(RoundedCornerShape(style.radiusSm))
+                    .background(if (on) pal.accentSoft else pal.surface2)
                     .border(1.5.dp, if (on) pal.accentBorder else pal.border, RoundedCornerShape(style.radiusSm))
                     .clickable { onSelect(l.code) }
                     .padding(vertical = 9.dp),

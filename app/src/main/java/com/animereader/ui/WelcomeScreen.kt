@@ -1,5 +1,6 @@
 package com.animereader.ui
 
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Arrangement
@@ -19,9 +20,13 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
+import com.animereader.R
 import com.animereader.data.AppMode
 import com.animereader.data.Settings
 import com.animereader.ui.components.AppIcon
@@ -60,11 +65,13 @@ fun WelcomeScreen(
             horizontalAlignment = Alignment.CenterHorizontally,
             verticalArrangement = Arrangement.Center,
         ) {
-            // Brand mark
-            Box(Modifier.size(84.dp).background(pal.accent, RoundedCornerShape(24.dp)),
-                contentAlignment = Alignment.Center) {
-                AppIcon("play", 40.dp, pal.onAccent)
-            }
+            // Brand mark — the crossed-flags logo
+            Image(
+                painter = painterResource(R.drawable.logo),
+                contentDescription = "AnimeReader",
+                contentScale = ContentScale.Crop,
+                modifier = Modifier.size(84.dp).clip(RoundedCornerShape(24.dp)),
+            )
             Spacer(Modifier.height(26.dp))
             Text("Lisez vos mangas\nles yeux fermés", color = pal.text, fontSize = fs(30f),
                 fontWeight = FontWeight.Bold, fontFamily = style.displayFamily, textAlign = TextAlign.Center)
@@ -87,8 +94,13 @@ fun WelcomeScreen(
                         fontSize = fs(12.5f), fontWeight = FontWeight.SemiBold)
                 }
             } else {
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Pill("target", "OCR instantané"); Pill("headphones", "Lecture TTS")
+                Column(
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Pill("target", "OCR instantané"); Pill("headphones", "Lecture TTS")
+                    }
                     Pill("sparkle", "Traduction IA", highlight = true)
                 }
             }

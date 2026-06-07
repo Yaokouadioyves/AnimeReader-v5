@@ -17,6 +17,7 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
@@ -104,7 +105,8 @@ fun PrimaryButton(label: String, icon: String? = null, modifier: Modifier = Modi
         modifier
             .fillMaxWidth()
             .height(52.dp)
-            .background(pal.accent, RoundedCornerShape(style.btnRadius))
+            .clip(RoundedCornerShape(style.btnRadius))
+            .background(pal.accent)
             .clickable { onClick() }
             .padding(horizontal = 20.dp),
         horizontalArrangement = Arrangement.Center, verticalAlignment = Alignment.CenterVertically,
@@ -121,6 +123,7 @@ fun GhostButton(label: String, icon: String? = null, modifier: Modifier = Modifi
         modifier
             .fillMaxWidth()
             .height(52.dp)
+            .clip(RoundedCornerShape(style.btnRadius))
             .border(1.5.dp, pal.border, RoundedCornerShape(style.btnRadius))
             .clickable { onClick() }
             .padding(horizontal = 20.dp),
@@ -139,6 +142,7 @@ fun DangerButton(label: String, modifier: Modifier = Modifier, onClick: () -> Un
         modifier
             .fillMaxWidth()
             .height(52.dp)
+            .clip(RoundedCornerShape(style.btnRadius))
             .border(1.5.dp, danger.copy(alpha = 0.35f), RoundedCornerShape(style.btnRadius))
             .clickable { onClick() }
             .padding(horizontal = 20.dp),
@@ -155,7 +159,8 @@ fun CircleIconButton(icon: String, onClick: () -> Unit) {
     Box(
         Modifier
             .size(42.dp)
-            .background(pal.surface2, CircleShape)
+            .clip(CircleShape)            // clip first so the ripple is bounded to the circle
+            .background(pal.surface2)
             .border(1.5.dp, pal.border, CircleShape)
             .clickable { onClick() },
         contentAlignment = Alignment.Center,
@@ -168,7 +173,8 @@ fun ARSwitch(checked: Boolean, onCheckedChange: (Boolean) -> Unit) {
     Box(
         Modifier
             .size(width = 50.dp, height = 30.dp)
-            .background(if (checked) pal.accent else pal.border, CircleShape)
+            .clip(CircleShape)
+            .background(if (checked) pal.accent else pal.border)
             .clickable { onCheckedChange(!checked) },
         contentAlignment = if (checked) Alignment.CenterEnd else Alignment.CenterStart,
     ) {
