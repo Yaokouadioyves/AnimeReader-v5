@@ -27,6 +27,7 @@ data class Settings(
     val captureInterval: Float = 1f,
     val autoplay: Boolean = true,
     val captionScale: Float = 1f,   // subtitle text size (0.85 / 1.0 / 1.2)
+    val geminiKey: String = "",     // user's free Gemini API key (on-device only)
     // Visual tweaks
     val direction: ThemeDirection = ThemeDirection.SUMI,
     val mode: AppMode = AppMode.LIGHT,
@@ -53,6 +54,7 @@ class SettingsRepository(private val context: Context) {
         val captureInterval = floatPreferencesKey("captureInterval")
         val autoplay = booleanPreferencesKey("autoplay")
         val captionScale = floatPreferencesKey("captionScale")
+        val geminiKey = stringPreferencesKey("geminiKey")
         val direction = stringPreferencesKey("direction")
         val mode = stringPreferencesKey("mode")
         val accent = stringPreferencesKey("accent")
@@ -75,6 +77,7 @@ class SettingsRepository(private val context: Context) {
             captureInterval = p[Keys.captureInterval] ?: d.captureInterval,
             autoplay = p[Keys.autoplay] ?: d.autoplay,
             captionScale = p[Keys.captionScale] ?: d.captionScale,
+            geminiKey = p[Keys.geminiKey] ?: d.geminiKey,
             direction = p[Keys.direction]?.let { enumOrNull<ThemeDirection>(it) } ?: d.direction,
             mode = p[Keys.mode]?.let { enumOrNull<AppMode>(it) } ?: d.mode,
             accent = p[Keys.accent] ?: d.accent,
@@ -99,6 +102,7 @@ class SettingsRepository(private val context: Context) {
                 captureInterval = p[Keys.captureInterval] ?: 1f,
                 autoplay = p[Keys.autoplay] ?: true,
                 captionScale = p[Keys.captionScale] ?: 1f,
+                geminiKey = p[Keys.geminiKey] ?: "",
                 direction = p[Keys.direction]?.let { enumOrNull<ThemeDirection>(it) } ?: ThemeDirection.SUMI,
                 mode = p[Keys.mode]?.let { enumOrNull<AppMode>(it) } ?: AppMode.LIGHT,
                 accent = p[Keys.accent] ?: "auto",
@@ -118,6 +122,7 @@ class SettingsRepository(private val context: Context) {
             p[Keys.captureInterval] = next.captureInterval
             p[Keys.autoplay] = next.autoplay
             p[Keys.captionScale] = next.captionScale
+            p[Keys.geminiKey] = next.geminiKey
             p[Keys.direction] = next.direction.name
             p[Keys.mode] = next.mode.name
             p[Keys.accent] = next.accent

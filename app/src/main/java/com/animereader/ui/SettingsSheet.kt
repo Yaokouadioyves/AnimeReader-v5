@@ -18,9 +18,11 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.ModalBottomSheet
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Slider
 import androidx.compose.material3.Text
 import androidx.compose.material3.rememberModalBottomSheetState
+import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -151,6 +153,25 @@ fun SettingsSheet(
                 Divider()
                 Inline("Lecture automatique", "Démarrer dès qu'un texte est détecté") {
                     ARSwitch(settings.autoplay) { v -> onUpdate { it.copy(autoplay = v) } }
+                }
+            }
+
+            GroupLabel("IA en ligne (Gemini)")
+            Card {
+                Column(Modifier.fillMaxWidth().padding(vertical = 12.dp)) {
+                    OutlinedTextField(
+                        value = settings.geminiKey,
+                        onValueChange = { v -> onUpdate { it.copy(geminiKey = v.trim()) } },
+                        label = { Text("Clé API Gemini") },
+                        singleLine = true,
+                        visualTransformation = PasswordVisualTransformation(),
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                    Text(
+                        "Gratuite sur aistudio.google.com · stockée sur l'appareil · active la voix IA en ligne (et bientôt l'OCR+traduction).",
+                        color = pal.textMuted, fontSize = fs(11.5f),
+                        modifier = Modifier.padding(top = 8.dp),
+                    )
                 }
             }
 
