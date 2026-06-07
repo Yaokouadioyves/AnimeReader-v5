@@ -59,9 +59,11 @@ private fun p(
 )
 
 // ── Sumi ──
+// Accent = the brand logo's pink (#F85876, sampled from logo.png) so the Démarrer /
+// "Revenir à la bulle" buttons, the floating bubble and the reading rectangle all match the logo.
 val sumiLight = p(
     "#ece5d6", "#fbf7ed", "#f1e9d8", "#fffdf6", "#ddd2bd", "#1d1813", "#867c69",
-    "#c0392b", "rgba(192,57,43,0.10)", "rgba(192,57,43,0.34)", "#fff7f0", "#3f7d3a", "#2f63a8",
+    "#f85876", "rgba(248,88,118,0.12)", "rgba(248,88,118,0.40)", "#ffffff", "#3f7d3a", "#2f63a8",
     "#e7dcc6", "#fbf7ed", "#23201b",
 )
 // Sumi dark == Neon navy (per final design).
@@ -70,7 +72,12 @@ private val navyDark = p(
     "#ff5e7a", "rgba(255,94,122,0.14)", "rgba(255,94,122,0.46)", "#ffffff", "#2ee6a6", "#b9a6ff",
     "#070a16", "#111734", "#eef1fb",
 )
-val sumiDark = navyDark
+// Sumi dark uses the same navy surfaces but the exact logo pink as accent.
+val sumiDark = navyDark.copy(
+    accent = parseColor("#f85876"),
+    accentSoft = parseColor("rgba(248,88,118,0.16)"),
+    accentBorder = parseColor("rgba(248,88,118,0.48)"),
+)
 
 // ── Neon ──
 val neonLight = p(
