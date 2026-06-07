@@ -2,6 +2,7 @@ package com.animereader.tts
 
 import android.content.Context
 import android.speech.tts.TextToSpeech
+import android.speech.tts.UtteranceProgressListener
 import android.util.Log
 import com.animereader.data.VoiceMethod
 import com.animereader.data.VoiceProviderId
@@ -19,8 +20,17 @@ interface VoiceProvider {
 /** Offline device TTS (android.speech.tts). Fully functional. */
 class DeviceTts(context: Context) : VoiceProvider {
     @Volatile private var ready = false
+
+    /** Invoked (on a binder thread) with the utterance id when speech finishes or errors. */
+    var onSpeechDone: ((String?) -> Unit)? = null
+
     private val tts = TextToSpeech(context.applicationContext) { status ->
         ready = status == TextToSpeech.SUCCESS
+        if (ready) tts.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
+            override fun onStart(utteranceId: String?) {}
+            override fun onDone(utteranceId: String?) { onSpeechDone?.invoke(utteranceId) }
+            @Deprecated("deprecated in API level 21") override fun onError(utteranceId: String?) { onSpeechDone?.invoke(utteranceId) }
+        })
     }
 
     override suspend fun speak(text: String, langTag: String, rate: Float, timbre: String) {

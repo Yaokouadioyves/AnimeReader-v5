@@ -91,13 +91,16 @@ class OverlayService : LifecycleService() {
     private var captionMain: TextView? = null
     private var captionSub: TextView? = null
     private var captionExpanded = false
-    private var playBtn: TextView? = null
+    private var playImg: ImageView? = null
     private var langBtn: TextView? = null
+    private var methodDot: View? = null
+    private var transImg: ImageView? = null
 
     private var overlaysAdded = false
     private var expanded = false
     private var playing = false
     private var lastSpoken = ""
+    @Volatile private var currentSpeechId: String? = null
 
     // Geometry (screen pixels)
     private var rx = 0; private var ry = 0; private var rw = 0; private var rh = 0
@@ -112,7 +115,16 @@ class OverlayService : LifecycleService() {
         repo = SettingsRepository(this)
         ocr = ScreenOcr()
         deviceTts = DeviceTts(this)
-        lifecycleScope.launch { repo.settings.collect { settings = it } }
+        deviceTts.onSpeechDone = { id -> ui.post { onSpeechFinished(id) } }
+        lifecycleScope.launch { repo.settings.collect { settings = it; ui.post { if (overlaysAdded) updateDock() } } }
+    }
+
+    /** When voice reading is on, hide the subtitle the moment the matching utterance finishes. */
+    private fun onSpeechFinished(id: String?) {
+        if (settings.ttsEnabled && id != null && id == currentSpeechId) {
+            ui.removeCallbacks(hideCaption)
+            captionBar?.visibility = View.GONE
+        }
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -171,6 +183,13 @@ class OverlayService : LifecycleService() {
     }
     private fun elevInt(): Int = resolvePalette(settings.direction, settings.mode, settings.accent).elev.toArgb()
     private fun textInt(): Int = resolvePalette(settings.direction, settings.mode, settings.accent).text.toArgb()
+    private fun onAccentInt(): Int = resolvePalette(settings.direction, settings.mode, settings.accent).onAccent.toArgb()
+    private fun borderInt(): Int = resolvePalette(settings.direction, settings.mode, settings.accent).border.toArgb()
+    private fun textMutedInt(): Int = resolvePalette(settings.direction, settings.mode, settings.accent).textMuted.toArgb()
+    private fun methodColorInt(): Int {
+        val p = resolvePalette(settings.direction, settings.mode, settings.accent)
+        return if (settings.method == TranslationMethod.OFFLINE) p.offline.toArgb() else p.online.toArgb()
+    }
 
     private fun addOverlays() {
         val (w, h, _) = displaySize()
@@ -244,15 +263,65 @@ class OverlayService : LifecycleService() {
         val dock = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
-            setPadding(dp(9), dp(9), dp(9), dp(9))
-            background = GradientDrawable().apply { cornerRadius = dp(999).toFloat(); setColor(elevInt()) }
+            setPadding(dp(8), dp(8), dp(8), dp(8))
+            background = GradientDrawable().apply {
+                cornerRadius = dp(999).toFloat(); setColor(elevInt()); setStroke(dp(1), borderInt())
+            }
+            elevation = dp(6).toFloat()
         }
-        playBtn = pillButton("▶") { togglePlay() }
-        langBtn = pillButton(Catalog.lang(settings.lang).tag) { cycleLanguage() }
-        val transBtn = pillButton("译") { toggleTranslate() }
-        val appBtn = pillButton("⚙") { openApp() }
-        dock.addView(playBtn); dock.addView(spacer()); dock.addView(langBtn); dock.addView(transBtn); dock.addView(appBtn)
+        // Play / pause — accent circle
+        playImg = ImageView(this).apply {
+            setImageResource(R.drawable.ic_play); setColorFilter(onAccentInt())
+            val p = dp(14); setPadding(p, p, p, p)
+            background = GradientDrawable().apply { shape = GradientDrawable.OVAL; setColor(accentInt()) }
+        }
+        dock.addView(FrameLayout(this).apply {
+            layoutParams = LinearLayout.LayoutParams(dp(50), dp(50))
+            addView(playImg, FrameLayout.LayoutParams(dp(50), dp(50)))
+            setOnClickListener { togglePlay() }
+        })
+        dock.addView(dockSep())
+        // Language pill — method dot + tag + chevron
+        val langPill = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL
+            setPadding(dp(12), dp(8), dp(10), dp(8))
+            background = GradientDrawable().apply { cornerRadius = dp(999).toFloat(); setColor(AColor.TRANSPARENT) }
+            setOnClickListener { cycleLanguage() }
+        }
+        methodDot = View(this).apply {
+            layoutParams = LinearLayout.LayoutParams(dp(7), dp(7)).apply { rightMargin = dp(7) }
+            background = GradientDrawable().apply { shape = GradientDrawable.OVAL; setColor(methodColorInt()) }
+        }
+        langPill.addView(methodDot)
+        langBtn = TextView(this).apply {
+            text = Catalog.lang(settings.lang).tag
+            setTextColor(textInt()); setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
+            typeface = android.graphics.Typeface.DEFAULT_BOLD
+        }
+        langPill.addView(langBtn)
+        langPill.addView(ImageView(this).apply {
+            setImageResource(R.drawable.ic_chevron_down); setColorFilter(textMutedInt())
+            layoutParams = LinearLayout.LayoutParams(dp(16), dp(16)).apply { leftMargin = dp(3) }
+        })
+        dock.addView(langPill)
+        // Translate toggle + open-app
+        transImg = dockIcon(R.drawable.ic_translate, if (settings.translateOn) accentInt() else textMutedInt()) { toggleTranslate() }
+        dock.addView(transImg)
+        dock.addView(dockIcon(R.drawable.ic_settings, textMutedInt()) { openApp() })
         return dock
+    }
+
+    private fun dockSep() = View(this).apply {
+        layoutParams = LinearLayout.LayoutParams(dp(1), dp(28)).apply { leftMargin = dp(4); rightMargin = dp(4) }
+        setBackgroundColor(borderInt())
+    }
+
+    private fun dockIcon(res: Int, tint: Int, onClick: () -> Unit): ImageView = ImageView(this).apply {
+        setImageResource(res); setColorFilter(tint)
+        val p = dp(12); setPadding(p, p, p, p)
+        layoutParams = LinearLayout.LayoutParams(dp(46), dp(46))
+        background = GradientDrawable().apply { shape = GradientDrawable.OVAL; setColor(AColor.TRANSPARENT) }
+        setOnClickListener { onClick() }
     }
 
     /** Subtitle bar: dark high-contrast scrim, white translation (translation-only),
@@ -286,21 +355,6 @@ class OverlayService : LifecycleService() {
                 if (captionExpanded && (captionSub?.text?.isNotEmpty() == true)) View.VISIBLE else View.GONE
         }
         return bar
-    }
-
-    private fun spacer() = View(this).apply {
-        layoutParams = LinearLayout.LayoutParams(dp(8), dp(1))
-    }
-
-    private fun pillButton(label: String, onClick: () -> Unit): TextView = TextView(this).apply {
-        text = label
-        gravity = Gravity.CENTER
-        setTextColor(textInt())
-        setTextSize(TypedValue.COMPLEX_UNIT_SP, 18f)
-        val s = dp(46); minWidth = s; minHeight = s
-        setPadding(dp(12), dp(8), dp(12), dp(8))
-        background = GradientDrawable().apply { cornerRadius = dp(999).toFloat(); setColor(AColor.TRANSPARENT) }
-        setOnClickListener { onClick() }
     }
 
     // ── Touch handlers ──
@@ -406,8 +460,11 @@ class OverlayService : LifecycleService() {
     }
 
     private fun updateDock() {
-        playBtn?.text = if (playing) "❚❚" else "▶"
+        playImg?.setImageResource(if (playing) R.drawable.ic_pause else R.drawable.ic_play)
+        playImg?.setColorFilter(onAccentInt())
         langBtn?.text = Catalog.lang(settings.lang).tag
+        methodDot?.background = GradientDrawable().apply { shape = GradientDrawable.OVAL; setColor(methodColorInt()) }
+        transImg?.setColorFilter(if (settings.translateOn) accentInt() else textMutedInt())
     }
 
     // ── Capture → OCR → translate → speak ──
@@ -445,6 +502,7 @@ class OverlayService : LifecycleService() {
         if (s.ttsEnabled) {
             val provider = Voices.create(s.voiceMethod, s.voiceProvider, apiKeys, deviceTts)
             val langTag = if (translated != null) s.lang else "fr"
+            currentSpeechId = toSpeak.hashCode().toString()
             provider.speak(toSpeak, langTag, s.speed, s.timbre)
         }
         withContext(Dispatchers.Main) { showCaption(original, translated) }
@@ -479,7 +537,9 @@ class OverlayService : LifecycleService() {
         sub.visibility = if (captionExpanded && sub.text.isNotEmpty()) View.VISIBLE else View.GONE
         bar.visibility = View.VISIBLE
         ui.removeCallbacks(hideCaption)
-        ui.postDelayed(hideCaption, 4500)
+        // When reading aloud, the utterance's onDone hides it; keep a long safety fallback.
+        // In translate-only mode there's no audio, so use a fixed readable duration.
+        ui.postDelayed(hideCaption, if (settings.ttsEnabled) 12000L else 4500L)
     }
     private val hideCaption = Runnable { captionBar?.visibility = View.GONE }
 
