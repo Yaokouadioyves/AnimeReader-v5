@@ -110,6 +110,13 @@ class OverlayService : LifecycleService() {
     @Volatile private var interacting = false
     @Volatile private var currentSpeechId: String? = null
     private var lastOcrErr = 0L
+    private var lastGeminiCall = 0L
+    private var geminiCooldownUntil = 0L
+    private val minGeminiGap = 3500L     // ~17 req/min ceiling (free-tier friendly)
+    private val geminiCooldown = 45000L  // back off this long after a 429
+    private val geminiCache = object : LinkedHashMap<String, Pair<String, String>>(64, 0.75f, true) {
+        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, Pair<String, String>>?) = size > 60
+    }
     private val recentSpoken = ArrayDeque<String>()
     private val stableFrames = 2
 
@@ -661,30 +668,43 @@ class OverlayService : LifecycleService() {
         val useGemini = s.method == TranslationMethod.ONLINE && s.geminiKey.isNotBlank()
 
         if (useGemini) {
-            // Re-capture the region and let Gemini vision do OCR + translation in one call
-            // (far better on stylised / deformed manga lettering than on-device ML Kit).
-            val jpeg = capturer?.captureRegion(Rect(rx, ry, rx + rw, ry + rh))?.let { bmp ->
-                val out = java.io.ByteArrayOutputStream()
-                bmp.compress(android.graphics.Bitmap.CompressFormat.JPEG, 85, out)
-                bmp.recycle(); out.toByteArray()
-            }
-            if (jpeg != null) {
-                val r = withContext(Dispatchers.IO) {
-                    runCatching { GeminiClient.ocrTranslate(s.geminiKey, jpeg, langName(s.lang)) }
-                }
-                r.exceptionOrNull()?.let { e ->
-                    val now = System.currentTimeMillis()
-                    if (now - lastOcrErr > 5000) {
-                        lastOcrErr = now
-                        ui.post { android.widget.Toast.makeText(this@OverlayService, "OCR Gemini ⚠️ ${e.message}", android.widget.Toast.LENGTH_SHORT).show() }
+            val cacheKey = "${s.lang}|${normalizeText(mlkitText)}"
+            val cached = synchronized(geminiCache) { geminiCache[cacheKey] }
+            if (cached != null) {
+                original = cached.first
+                translated = cached.second.ifBlank { null }
+            } else {
+                val now = System.currentTimeMillis()
+                // Skip the API while in a 429 cooldown or under the rate gap → falls back to ML Kit.
+                if (now >= geminiCooldownUntil && now - lastGeminiCall >= minGeminiGap) {
+                    lastGeminiCall = now
+                    val jpeg = capturer?.captureRegion(Rect(rx, ry, rx + rw, ry + rh))?.let { bmp ->
+                        val out = java.io.ByteArrayOutputStream()
+                        bmp.compress(android.graphics.Bitmap.CompressFormat.JPEG, 85, out)
+                        bmp.recycle(); out.toByteArray()
                     }
-                }
-                val res = r.getOrNull()
-                if (res != null && res.first.isNotBlank()) {
-                    original = res.first
-                    translated = res.second.ifBlank { null }
-                    // Guard against the model echoing the source instead of translating.
-                    if (translated != null && translated.equals(original, ignoreCase = true)) translated = null
+                    if (jpeg != null) {
+                        val r = withContext(Dispatchers.IO) {
+                            runCatching { GeminiClient.ocrTranslate(s.geminiKey, jpeg, langName(s.lang)) }
+                        }
+                        r.exceptionOrNull()?.let { e ->
+                            val msg = e.message ?: e.javaClass.simpleName
+                            if (msg.contains("429")) {
+                                geminiCooldownUntil = System.currentTimeMillis() + geminiCooldown
+                                toastThrottled("Quota Gemini atteint → traduction hors-ligne temporaire")
+                            } else {
+                                toastThrottled("OCR Gemini ⚠️ $msg")
+                            }
+                        }
+                        val res = r.getOrNull()
+                        if (res != null && res.first.isNotBlank()) {
+                            original = res.first
+                            translated = res.second.ifBlank { null }
+                            // Guard against the model echoing the source instead of translating.
+                            if (translated != null && translated.equals(original, ignoreCase = true)) translated = null
+                            synchronized(geminiCache) { geminiCache[cacheKey] = original to (translated ?: "") }
+                        }
+                    }
                 }
             }
         }
@@ -726,6 +746,14 @@ class OverlayService : LifecycleService() {
     /** When reading untranslated source, pick a voice language: CJK -> Japanese, else French. */
     private fun detectSpokenLang(text: String): String =
         if (text.any { it.code in 0x3000..0x9FFF || it.code in 0xFF00..0xFFEF }) "ja" else "fr"
+
+    private fun toastThrottled(msg: String) {
+        val now = System.currentTimeMillis()
+        if (now - lastOcrErr > 5000) {
+            lastOcrErr = now
+            ui.post { android.widget.Toast.makeText(this, msg, android.widget.Toast.LENGTH_SHORT).show() }
+        }
+    }
 
     private fun showCaption(original: String, translated: String?) {
         val main = captionMain ?: return
