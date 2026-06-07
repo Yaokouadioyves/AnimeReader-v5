@@ -87,7 +87,10 @@ class OverlayService : LifecycleService() {
     private var moveHandle: View? = null
     private var sizeHandle: View? = null
     private var controls: View? = null
-    private var captionView: TextView? = null
+    private var captionBar: View? = null
+    private var captionMain: TextView? = null
+    private var captionSub: TextView? = null
+    private var captionExpanded = false
     private var playBtn: TextView? = null
     private var langBtn: TextView? = null
 
@@ -201,11 +204,23 @@ class OverlayService : LifecycleService() {
             attachSizeTouch(it)
         }
 
-        // Controls (caption + dock) at the bottom
+        // Control dock at the bottom
         controls = buildControls().also {
             wm.addView(it, overlayParams(WindowManager.LayoutParams.MATCH_PARENT, WindowManager.LayoutParams.WRAP_CONTENT, true).apply {
                 gravity = Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL; y = dp(24)
             })
+        }
+
+        // Subtitle bar just above the dock (its own window so the blur-behind only frosts the bar)
+        captionBar = buildCaptionBar().also {
+            val lp = overlayParams(WindowManager.LayoutParams.WRAP_CONTENT, WindowManager.LayoutParams.WRAP_CONTENT, touchable = true).apply {
+                gravity = Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL; y = dp(100)
+            }
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                lp.flags = lp.flags or WindowManager.LayoutParams.FLAG_BLUR_BEHIND
+                lp.setBlurBehindRadius(dp(16))
+            }
+            wm.addView(it, lp)
         }
 
         overlaysAdded = true
@@ -226,21 +241,6 @@ class OverlayService : LifecycleService() {
     }
 
     private fun buildControls(): View {
-        val col = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            gravity = Gravity.CENTER_HORIZONTAL
-            setPadding(dp(12), 0, dp(12), 0)
-        }
-        // Caption card
-        captionView = TextView(this).apply {
-            setPadding(dp(14), dp(10), dp(14), dp(10))
-            setTextColor(textInt()); textSize = 13f
-            background = GradientDrawable().apply { cornerRadius = dp(12).toFloat(); setColor(elevInt()) }
-            visibility = View.GONE
-        }
-        col.addView(captionView, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply { bottomMargin = dp(10) })
-
-        // Dock row
         val dock = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
@@ -252,8 +252,40 @@ class OverlayService : LifecycleService() {
         val transBtn = pillButton("译") { toggleTranslate() }
         val appBtn = pillButton("⚙") { openApp() }
         dock.addView(playBtn); dock.addView(spacer()); dock.addView(langBtn); dock.addView(transBtn); dock.addView(appBtn)
-        col.addView(dock)
-        return col
+        return dock
+    }
+
+    /** Subtitle bar: dark high-contrast scrim, white translation (translation-only),
+     *  tap to reveal the original. Theme-independent so it stays readable over any page. */
+    private fun buildCaptionBar(): View {
+        val maxW = displaySize().first - dp(40)
+        val bar = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            gravity = Gravity.CENTER_HORIZONTAL
+            setPadding(dp(18), dp(12), dp(18), dp(12))
+            background = GradientDrawable().apply { cornerRadius = dp(16).toFloat(); setColor(AColor.argb(186, 8, 8, 12)) }
+            visibility = View.GONE
+        }
+        captionMain = TextView(this).apply {
+            setTextColor(AColor.WHITE)
+            gravity = Gravity.CENTER
+            maxWidth = maxW
+            setLineSpacing(0f, 1.1f)
+        }
+        captionSub = TextView(this).apply {
+            setTextColor(AColor.argb(155, 255, 255, 255))
+            gravity = Gravity.CENTER
+            maxWidth = maxW
+            setPadding(0, dp(5), 0, 0)
+            visibility = View.GONE
+        }
+        bar.addView(captionMain); bar.addView(captionSub)
+        bar.setOnClickListener {
+            captionExpanded = !captionExpanded
+            captionSub?.visibility =
+                if (captionExpanded && (captionSub?.text?.isNotEmpty() == true)) View.VISIBLE else View.GONE
+        }
+        return bar
     }
 
     private fun spacer() = View(this).apply {
@@ -352,7 +384,8 @@ class OverlayService : LifecycleService() {
         expanded = value
         val vis = if (value) View.VISIBLE else View.GONE
         frame?.visibility = vis; moveHandle?.visibility = vis; sizeHandle?.visibility = vis; controls?.visibility = vis
-        if (value) { playing = true; wake(); startLoop(); updateDock() } else { playing = false; stopLoop(); deviceTts.stop() }
+        if (value) { playing = true; wake(); startLoop(); updateDock() }
+        else { playing = false; stopLoop(); deviceTts.stop(); ui.removeCallbacks(hideCaption); captionBar?.visibility = View.GONE }
     }
 
     private fun togglePlay() {
@@ -428,13 +461,27 @@ class OverlayService : LifecycleService() {
     }
 
     private fun showCaption(original: String, translated: String?) {
-        val c = captionView ?: return
-        c.text = if (translated != null) "$original\n$translated" else original
-        c.visibility = View.VISIBLE
+        val main = captionMain ?: return
+        val sub = captionSub ?: return
+        val bar = captionBar ?: return
+        val scale = settings.captionScale
+        main.setTextSize(TypedValue.COMPLEX_UNIT_SP, 17f * scale)
+        sub.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12.5f * scale)
+        // Translation-only by default: the translation is the main line; the original (FR)
+        // is the secondary line, hidden until the user taps the bar.
+        if (!translated.isNullOrBlank()) {
+            main.text = translated
+            sub.text = original
+        } else {
+            main.text = original
+            sub.text = ""
+        }
+        sub.visibility = if (captionExpanded && sub.text.isNotEmpty()) View.VISIBLE else View.GONE
+        bar.visibility = View.VISIBLE
         ui.removeCallbacks(hideCaption)
-        ui.postDelayed(hideCaption, 3200)
+        ui.postDelayed(hideCaption, 4500)
     }
-    private val hideCaption = Runnable { captionView?.visibility = View.GONE }
+    private val hideCaption = Runnable { captionBar?.visibility = View.GONE }
 
     private fun openApp() {
         startActivity(Intent(this, MainActivity::class.java).apply {
@@ -476,7 +523,7 @@ class OverlayService : LifecycleService() {
     override fun onDestroy() {
         _running.value = false
         stopLoop()
-        listOfNotNull(bubble, frame, moveHandle, sizeHandle, controls).forEach { runCatching { wm.removeView(it) } }
+        listOfNotNull(bubble, frame, moveHandle, sizeHandle, controls, captionBar).forEach { runCatching { wm.removeView(it) } }
         capturer?.stop()
         runCatching { projection?.stop() }
         ocr.close(); deviceTts.shutdown()

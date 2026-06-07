@@ -146,6 +146,13 @@ fun SettingsSheet(
                     }
                 }
                 Divider()
+                Stacked("Taille des sous-titres", "Texte de la traduction affichée à l'écran") {
+                    Segment(
+                        options = listOf("Petit" to 0.85f, "Moyen" to 1f, "Grand" to 1.2f),
+                        selected = settings.captionScale, compact = true,
+                    ) { v -> onUpdate { it.copy(captionScale = v) } }
+                }
+                Divider()
                 Inline("Lecture automatique", "Démarrer dès qu'un texte est détecté") {
                     ARSwitch(settings.autoplay) { v -> onUpdate { it.copy(autoplay = v) } }
                 }
