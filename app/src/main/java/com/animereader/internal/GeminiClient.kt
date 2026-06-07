@@ -15,8 +15,9 @@ import java.net.URL
 object GeminiClient {
 
     private const val BASE = "https://generativelanguage.googleapis.com/v1beta/models"
-    const val TTS_MODEL = "gemini-2.5-flash-preview-tts"
-    const val VISION_MODEL = "gemini-2.5-flash"
+    // Fastest free models measured: 3.1 TTS (~4s vs 5.7s) and flash-lite vision (~2.5s, higher rate limit).
+    const val TTS_MODEL = "gemini-3.1-flash-tts-preview"
+    const val VISION_MODEL = "gemini-2.5-flash-lite"
 
     /**
      * Manga OCR + translation in one vision call. Returns (original, translation) or null on error.
