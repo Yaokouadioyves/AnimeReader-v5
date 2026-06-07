@@ -6,9 +6,11 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.rememberScrollState
@@ -49,6 +51,12 @@ fun SettingsSheet(
 ) {
     val pal = LocalPalette.current
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+
+    val methodSub = if (settings.method == TranslationMethod.OFFLINE) "ML Kit — sur l'appareil"
+        else "IA cloud — ${settings.provider.displayName}"
+    val voiceSub = if (settings.voiceMethod == VoiceMethod.OFFLINE) "Moteur TTS de l'appareil"
+        else "Voix IA — ${settings.voiceProvider.displayName}"
+
     ModalBottomSheet(onDismissRequest = onClose, sheetState = sheetState, containerColor = pal.elev) {
         Column(
             Modifier.fillMaxWidth().padding(horizontal = 18.dp).padding(bottom = 28.dp)
@@ -60,41 +68,53 @@ fun SettingsSheet(
                 Text("Réglages", color = pal.text, fontSize = fs(17f), fontWeight = FontWeight.Bold)
             }
 
+            // ── Traduction ──
             GroupLabel("Traduction")
             Card {
-                Segment(
-                    options = listOf("Hors-ligne" to TranslationMethod.OFFLINE, "IA en ligne" to TranslationMethod.ONLINE),
-                    selected = settings.method,
-                ) { v -> onUpdate { it.copy(method = v) } }
-                if (settings.method == TranslationMethod.ONLINE) {
-                    Spacer(Modifier.size(10.dp))
-                    ProviderRow(TextProvider.entries, settings.provider, { it.displayName }, { it.org }) { v ->
-                        onUpdate { s -> s.copy(provider = v) }
-                    }
-                }
-                SRow("Traduire automatiquement", "Avant la lecture à voix haute") {
-                    ARSwitch(settings.translateOn) { v -> onUpdate { it.copy(translateOn = v) } }
-                }
-                LangGrid(settings.lang) { code -> onUpdate { it.copy(lang = code) } }
-            }
-
-            GroupLabel("Voix & lecture")
-            Card {
-                SRow("Lire à voix haute", "Désactivez pour traduire sans audio") {
-                    ARSwitch(settings.ttsEnabled) { v -> onUpdate { it.copy(ttsEnabled = v) } }
-                }
-                if (settings.ttsEnabled) {
+                Stacked("Méthode", methodSub) {
                     Segment(
-                        options = listOf("Hors-ligne" to VoiceMethod.OFFLINE, "IA en ligne" to VoiceMethod.ONLINE),
-                        selected = settings.voiceMethod,
-                    ) { v -> onUpdate { it.copy(voiceMethod = v) } }
-                    if (settings.voiceMethod == VoiceMethod.ONLINE) {
+                        options = listOf("Hors-ligne" to TranslationMethod.OFFLINE, "IA en ligne" to TranslationMethod.ONLINE),
+                        selected = settings.method,
+                    ) { v -> onUpdate { it.copy(method = v) } }
+                    if (settings.method == TranslationMethod.ONLINE) {
                         Spacer(Modifier.size(10.dp))
-                        ProviderRow(VoiceProviderId.entries, settings.voiceProvider, { it.displayName }, { it.org }) { v ->
-                            onUpdate { s -> s.copy(voiceProvider = v) }
+                        ProviderRow(TextProvider.entries, settings.provider, { it.displayName }, { it.org }) { v ->
+                            onUpdate { s -> s.copy(provider = v) }
                         }
                     }
-                    SRow("Vitesse de lecture", null) {
+                }
+                Divider()
+                Inline("Traduire automatiquement", "Avant la lecture à voix haute") {
+                    ARSwitch(settings.translateOn) { v -> onUpdate { it.copy(translateOn = v) } }
+                }
+                Divider()
+                Stacked("Langue cible", null) {
+                    LangGridMini(settings.lang) { code -> onUpdate { it.copy(lang = code) } }
+                }
+            }
+
+            // ── Voix & lecture ──
+            GroupLabel("Voix & lecture")
+            Card {
+                Inline("Lire à voix haute", "Désactivez pour traduire sans lecture audio") {
+                    ARSwitch(settings.ttsEnabled) { v -> onUpdate { it.copy(ttsEnabled = v) } }
+                }
+                Divider()
+                if (settings.ttsEnabled) {
+                    Stacked("Synthèse vocale", voiceSub) {
+                        Segment(
+                            options = listOf("Hors-ligne" to VoiceMethod.OFFLINE, "IA en ligne" to VoiceMethod.ONLINE),
+                            selected = settings.voiceMethod,
+                        ) { v -> onUpdate { it.copy(voiceMethod = v) } }
+                        if (settings.voiceMethod == VoiceMethod.ONLINE) {
+                            Spacer(Modifier.size(10.dp))
+                            ProviderRow(VoiceProviderId.entries, settings.voiceProvider, { it.displayName }, { it.org }) { v ->
+                                onUpdate { s -> s.copy(voiceProvider = v) }
+                            }
+                        }
+                    }
+                    Divider()
+                    Inline("Vitesse de lecture", null) {
                         Row(verticalAlignment = Alignment.CenterVertically) {
                             Slider(
                                 value = settings.speed, onValueChange = { v -> onUpdate { it.copy(speed = v) } },
@@ -105,24 +125,28 @@ fun SettingsSheet(
                                 fontSize = fs(13f), fontWeight = FontWeight.Bold)
                         }
                     }
-                    SRow("Timbre", null) {
-                        Segment(
-                            options = Catalog.timbres.map { it to it }, selected = settings.timbre, compact = true,
-                        ) { v -> onUpdate { it.copy(timbre = v) } }
+                    Divider()
+                    Stacked("Timbre", null) {
+                        Segment(options = Catalog.timbres.map { it to it }, selected = settings.timbre, compact = true) { v ->
+                            onUpdate { it.copy(timbre = v) }
+                        }
                     }
+                    Divider()
                 } else {
-                    Row(Modifier.padding(vertical = 12.dp), verticalAlignment = Alignment.Top) {
+                    Row(Modifier.fillMaxWidth().padding(vertical = 14.dp), verticalAlignment = Alignment.Top) {
                         AppIcon("sparkle", 15.dp, pal.accent); Spacer(Modifier.size(8.dp))
                         Text("Mode traduction seule — les bulles sont traduites et affichées, sans audio.",
                             color = pal.textMuted, fontSize = fs(12f))
                     }
+                    Divider()
                 }
-                SRow("Intervalle de capture", "Fréquence de relecture de la zone") {
-                    Segment(
-                        options = Catalog.captureIntervals.map { "${it}s" to it }, selected = settings.captureInterval, compact = true,
-                    ) { v -> onUpdate { it.copy(captureInterval = v) } }
+                Stacked("Intervalle de capture", "Fréquence de relecture de la zone") {
+                    Segment(options = Catalog.captureIntervals.map { "${it}s" to it }, selected = settings.captureInterval, compact = true) { v ->
+                        onUpdate { it.copy(captureInterval = v) }
+                    }
                 }
-                SRow("Lecture automatique", "Démarrer dès qu’un texte est détecté") {
+                Divider()
+                Inline("Lecture automatique", "Démarrer dès qu'un texte est détecté") {
                     ARSwitch(settings.autoplay) { v -> onUpdate { it.copy(autoplay = v) } }
                 }
             }
@@ -142,33 +166,55 @@ private fun GroupLabel(text: String) {
 }
 
 @Composable
-private fun Card(content: @Composable () -> Unit) {
+private fun Card(content: @Composable ColumnScope.() -> Unit) {
     val pal = LocalPalette.current; val style = LocalDirStyle.current
     Column(
         Modifier.fillMaxWidth()
-            .background(pal.surface, RoundedCornerShape(style.radius))
+            .clip(RoundedCornerShape(style.radius))
+            .background(pal.surface)
             .border(1.5.dp, pal.border, RoundedCornerShape(style.radius))
-            .padding(horizontal = 15.dp, vertical = 4.dp),
-    ) { content() }
+            .padding(horizontal = 15.dp),
+        content = content,
+    )
+}
+
+/** Label + optional sub on the left, a control on the right (toggles, slider). */
+@Composable
+private fun Inline(label: String, sub: String?, control: @Composable () -> Unit) {
+    Row(Modifier.fillMaxWidth().padding(vertical = 14.dp), verticalAlignment = Alignment.CenterVertically) {
+        Column(Modifier.weight(1f)) { LabelText(label, sub) }
+        control()
+    }
+}
+
+/** Label + optional sub on top, a full-width control below (segments, grids). */
+@Composable
+private fun Stacked(label: String, sub: String?, content: @Composable () -> Unit) {
+    Column(Modifier.fillMaxWidth().padding(vertical = 14.dp)) {
+        LabelText(label, sub)
+        Spacer(Modifier.size(12.dp))
+        content()
+    }
 }
 
 @Composable
-private fun SRow(label: String, sub: String?, control: @Composable () -> Unit) {
+private fun LabelText(label: String, sub: String?) {
     val pal = LocalPalette.current
-    Row(Modifier.fillMaxWidth().padding(vertical = 14.dp), verticalAlignment = Alignment.CenterVertically) {
-        Column(Modifier.weight(1f)) {
-            Text(label, color = pal.text, fontSize = fs(14f), fontWeight = FontWeight.SemiBold)
-            if (sub != null) Text(sub, color = pal.textMuted, fontSize = fs(11.5f))
-        }
-        control()
-    }
+    Text(label, color = pal.text, fontSize = fs(14f), fontWeight = FontWeight.SemiBold)
+    if (sub != null) Text(sub, color = pal.textMuted, fontSize = fs(11.5f),
+        modifier = Modifier.padding(top = 2.dp))
+}
+
+@Composable
+private fun Divider() {
+    Box(Modifier.fillMaxWidth().height(1.dp).background(LocalPalette.current.border))
 }
 
 @Composable
 private fun <T> Segment(options: List<Pair<String, T>>, selected: T, compact: Boolean = false, onSelect: (T) -> Unit) {
     val pal = LocalPalette.current
     Row(
-        Modifier.fillMaxWidth().background(pal.surface2, RoundedCornerShape(999.dp)).padding(4.dp),
+        Modifier.fillMaxWidth().clip(RoundedCornerShape(999.dp)).background(pal.surface2).padding(4.dp),
         horizontalArrangement = Arrangement.spacedBy(6.dp),
     ) {
         options.forEach { (label, value) ->
@@ -193,7 +239,7 @@ private fun <T> ProviderRow(
     items: List<T>, selected: T, name: (T) -> String, org: (T) -> String, onSelect: (T) -> Unit,
 ) {
     val pal = LocalPalette.current; val style = LocalDirStyle.current
-    Row(Modifier.fillMaxWidth().padding(bottom = 8.dp), horizontalArrangement = Arrangement.spacedBy(7.dp)) {
+    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(7.dp)) {
         items.forEach { item ->
             val on = item == selected
             Column(
@@ -213,22 +259,21 @@ private fun <T> ProviderRow(
 }
 
 @Composable
-private fun LangGrid(selected: String, onSelect: (String) -> Unit) {
+private fun LangGridMini(selected: String, onSelect: (String) -> Unit) {
     val pal = LocalPalette.current; val style = LocalDirStyle.current
-    Row(Modifier.fillMaxWidth().padding(vertical = 10.dp), horizontalArrangement = Arrangement.spacedBy(7.dp)) {
+    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
         Catalog.languages.forEach { l ->
             val on = l.code == selected
-            Column(
+            Box(
                 Modifier.weight(1f)
                     .clip(RoundedCornerShape(style.radiusSm))
                     .background(if (on) pal.accentSoft else pal.surface2)
                     .border(1.5.dp, if (on) pal.accentBorder else pal.border, RoundedCornerShape(style.radiusSm))
                     .clickable { onSelect(l.code) }
-                    .padding(vertical = 9.dp),
-                horizontalAlignment = Alignment.CenterHorizontally,
+                    .padding(vertical = 10.dp),
+                contentAlignment = Alignment.Center,
             ) {
                 Text(l.tag, color = if (on) pal.accent else pal.text, fontSize = fs(13f), fontWeight = FontWeight.Bold)
-                Text(if (l.code == "fr") "Orig." else l.label.take(4), color = pal.textMuted, fontSize = fs(9.5f))
             }
         }
     }
