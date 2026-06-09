@@ -42,6 +42,7 @@ import com.animereader.data.TranslationMethod
 import com.animereader.data.VoiceMethod
 import com.animereader.internal.ApiKeys
 import com.animereader.internal.GeminiClient
+import com.animereader.internal.TextDedup
 import com.animereader.ocr.ScreenOcr
 import com.animereader.translate.Translators
 import com.animereader.tts.DeviceTts
@@ -457,15 +458,26 @@ class OverlayService : LifecycleService() {
     private fun replayCurrent() {
         lifecycleScope.launch(Dispatchers.Default) {
             val bmp = capturer?.captureRegion(Rect(rx, ry, rx + rw, ry + rh)) ?: return@launch
-            val raw = runCatching { ocr.recognize(bmp) }.getOrDefault(""); bmp.recycle()
+            val raw = runCatching { ocr.recognize(bmp) }.getOrDefault("")
+            val jpeg = if (raw.isNotBlank() && geminiEnabled()) compressJpeg(bmp) else null
+            bmp.recycle()
             if (raw.isNotBlank()) {
-                val norm = normalizeText(raw)
+                val norm = TextDedup.normalize(raw)
                 synchronized(recentSpoken) {
                     if (norm !in recentSpoken) { recentSpoken.addLast(norm); while (recentSpoken.size > 8) recentSpoken.removeFirst() }
                 }
-                handleRecognized(raw)
+                handleRecognized(raw, jpeg)
             }
         }
+    }
+
+    private fun geminiEnabled(): Boolean =
+        settings.method == TranslationMethod.ONLINE && settings.geminiKey.isNotBlank()
+
+    private fun compressJpeg(bmp: android.graphics.Bitmap): ByteArray {
+        val out = java.io.ByteArrayOutputStream()
+        bmp.compress(android.graphics.Bitmap.CompressFormat.JPEG, 92, out)
+        return out.toByteArray()
     }
 
     /** Subtitle bar: dark high-contrast scrim, white translation (translation-only),
@@ -617,58 +629,47 @@ class OverlayService : LifecycleService() {
                 val bmp = capturer?.captureRegion(region)
                 if (bmp != null) {
                     val raw = runCatching { ocr.recognize(bmp) }.getOrDefault("")
-                    bmp.recycle()
-                    val norm = normalizeText(raw)
+                    val norm = TextDedup.normalize(raw)
+                    var trigger = false
+                    var jpeg: ByteArray? = null
                     if (norm.length >= 2) {
                         if (norm == pending) stable++ else { pending = norm; stable = 1 }
                         // Read only once the OCR has settled (same text across captures) and the
                         // line isn't a repeat/continuation of something we just read.
                         if (stable == stableFrames && !isRecentDuplicate(norm)) {
+                            trigger = true
                             synchronized(recentSpoken) { recentSpoken.addLast(norm); while (recentSpoken.size > 8) recentSpoken.removeFirst() }
-                            handleRecognized(raw)
+                            // Reuse THIS exact frame for Gemini OCR (no second capture → faster, and
+                            // the vision model sees the same pixels ML Kit just read).
+                            if (geminiEnabled()) jpeg = compressJpeg(bmp)
                         }
                     }
+                    bmp.recycle()
+                    if (trigger) handleRecognized(raw, jpeg)
                 }
                 delay((settings.captureInterval * 1000).toLong().coerceAtLeast(400))
             }
         }
     }
 
-    /** Lowercase, strip whitespace/punctuation (keeps CJK) so dedup ignores cosmetic OCR diffs. */
-    private fun normalizeText(s: String): String =
-        s.lowercase().replace(Regex("[\\s\\p{Punct}　・…]+"), "")
-
     private fun isRecentDuplicate(norm: String): Boolean {
         val snapshot = synchronized(recentSpoken) { recentSpoken.toList() }
-        for (prev in snapshot) {
-            if (norm == prev) return true
-            val shorter = if (norm.length <= prev.length) norm else prev
-            val longer = if (norm.length <= prev.length) prev else norm
-            if (longer.contains(shorter) && shorter.length >= longer.length * 0.6) return true
-            if (bigramSimilarity(norm, prev) >= 0.82) return true
-        }
-        return false
-    }
-
-    private fun bigramSimilarity(a: String, b: String): Double {
-        if (a.length < 2 || b.length < 2) return if (a == b) 1.0 else 0.0
-        fun bigrams(s: String) = (0 until s.length - 1).mapTo(HashSet()) { s.substring(it, it + 2) }
-        val sa = bigrams(a); val sb = bigrams(b)
-        val inter = sa.count { it in sb }
-        val union = sa.size + sb.size - inter
-        return if (union == 0) 0.0 else inter.toDouble() / union
+        return TextDedup.isDuplicate(norm, snapshot)
     }
 
     private fun stopLoop() { captureJob?.cancel(); captureJob = null }
 
-    private suspend fun handleRecognized(mlkitText: String) {
+    private suspend fun handleRecognized(mlkitText: String, regionJpeg: ByteArray?) {
         val s = settings
         var original = mlkitText
         var translated: String? = null
         val useGemini = s.method == TranslationMethod.ONLINE && s.geminiKey.isNotBlank()
 
+        // Open the voice socket now so its ~0.7 s handshake overlaps the OCR/translation wait below.
+        if (s.ttsEnabled && s.voiceMethod == VoiceMethod.ONLINE) edgeVoice.prewarm()
+
         if (useGemini) {
-            val cacheKey = "${s.lang}|${normalizeText(mlkitText)}"
+            val cacheKey = "${s.lang}|${TextDedup.normalize(mlkitText)}"
             val cached = synchronized(geminiCache) { geminiCache[cacheKey] }
             if (cached != null) {
                 original = cached.first
@@ -676,34 +677,27 @@ class OverlayService : LifecycleService() {
             } else {
                 val now = System.currentTimeMillis()
                 // Skip the API while in a 429 cooldown or under the rate gap → falls back to ML Kit.
-                if (now >= geminiCooldownUntil && now - lastGeminiCall >= minGeminiGap) {
+                if (regionJpeg != null && now >= geminiCooldownUntil && now - lastGeminiCall >= minGeminiGap) {
                     lastGeminiCall = now
-                    val jpeg = capturer?.captureRegion(Rect(rx, ry, rx + rw, ry + rh))?.let { bmp ->
-                        val out = java.io.ByteArrayOutputStream()
-                        bmp.compress(android.graphics.Bitmap.CompressFormat.JPEG, 85, out)
-                        bmp.recycle(); out.toByteArray()
+                    val r = withContext(Dispatchers.IO) {
+                        runCatching { GeminiClient.ocrTranslate(s.geminiKey, regionJpeg, langName(s.lang)) }
                     }
-                    if (jpeg != null) {
-                        val r = withContext(Dispatchers.IO) {
-                            runCatching { GeminiClient.ocrTranslate(s.geminiKey, jpeg, langName(s.lang)) }
+                    r.exceptionOrNull()?.let { e ->
+                        val msg = e.message ?: e.javaClass.simpleName
+                        if (msg.contains("429")) {
+                            geminiCooldownUntil = System.currentTimeMillis() + geminiCooldown
+                            toastThrottled("Quota Gemini atteint → traduction hors-ligne temporaire")
+                        } else {
+                            toastThrottled("OCR Gemini ⚠️ $msg")
                         }
-                        r.exceptionOrNull()?.let { e ->
-                            val msg = e.message ?: e.javaClass.simpleName
-                            if (msg.contains("429")) {
-                                geminiCooldownUntil = System.currentTimeMillis() + geminiCooldown
-                                toastThrottled("Quota Gemini atteint → traduction hors-ligne temporaire")
-                            } else {
-                                toastThrottled("OCR Gemini ⚠️ $msg")
-                            }
-                        }
-                        val res = r.getOrNull()
-                        if (res != null && res.first.isNotBlank()) {
-                            original = res.first
-                            translated = res.second.ifBlank { null }
-                            // Guard against the model echoing the source instead of translating.
-                            if (translated != null && translated.equals(original, ignoreCase = true)) translated = null
-                            synchronized(geminiCache) { geminiCache[cacheKey] = original to (translated ?: "") }
-                        }
+                    }
+                    val res = r.getOrNull()
+                    if (res != null && res.first.isNotBlank()) {
+                        original = res.first
+                        translated = res.second.ifBlank { null }
+                        // Guard against the model echoing the source instead of translating.
+                        if (translated != null && translated.equals(original, ignoreCase = true)) translated = null
+                        synchronized(geminiCache) { geminiCache[cacheKey] = original to (translated ?: "") }
                     }
                 }
             }

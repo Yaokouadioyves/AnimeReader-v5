@@ -75,4 +75,6 @@ dependencies {
     implementation(libs.mlkit.text.recognition.japanese)
     implementation(libs.mlkit.translate)
     implementation(libs.okhttp)
+
+    testImplementation("junit:junit:4.13.2")
 }

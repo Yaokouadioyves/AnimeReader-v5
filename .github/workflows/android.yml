@@ -28,6 +28,9 @@ jobs:
           gradle-version: '8.9'
 
       # Uses the Gradle installed above (no committed gradle-wrapper.jar needed).
+      - name: Unit tests (token + de-dup logic)
+        run: gradle testDebugUnitTest --no-daemon --stacktrace
+
       - name: Build debug APK
         run: gradle assembleDebug --no-daemon --stacktrace
 
