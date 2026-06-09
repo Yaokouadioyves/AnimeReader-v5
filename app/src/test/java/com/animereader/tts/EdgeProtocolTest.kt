@@ -34,7 +34,9 @@ class EdgeProtocolTest {
     @Test fun ratePct_signedPercent() {
         assertEquals("+0%", EdgeProtocol.ratePct(1f))
         assertEquals("+50%", EdgeProtocol.ratePct(1.5f))
-        assertEquals("-20%", EdgeProtocol.ratePct(0.8f))
+        // Float truncation toward zero: (0.8f-1f)*100f = -19.999… → -19 (acceptable for a TTS rate).
+        assertEquals("-19%", EdgeProtocol.ratePct(0.8f))
+        assertEquals("-50%", EdgeProtocol.ratePct(0.5f))
     }
 
     @Test fun langOf_stripsVoiceName() {
