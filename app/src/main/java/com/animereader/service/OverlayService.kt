@@ -47,7 +47,6 @@ import com.animereader.translate.Translators
 import com.animereader.tts.DeviceTts
 import com.animereader.tts.EdgeVoice
 import com.animereader.tts.VoiceProvider
-import com.animereader.tts.Voices
 import com.animereader.ui.theme.resolvePalette
 import androidx.compose.ui.graphics.toArgb
 import kotlinx.coroutines.Dispatchers
@@ -109,9 +108,11 @@ class OverlayService : LifecycleService() {
     private var playing = false
     @Volatile private var interacting = false
     @Volatile private var currentSpeechId: String? = null
-    private var lastOcrErr = 0L
-    private var lastGeminiCall = 0L
-    private var geminiCooldownUntil = 0L
+    // Read/written from handleRecognized, which can run on more than one Default coroutine
+    // (capture loop + replay) → keep visibility across threads.
+    @Volatile private var lastOcrErr = 0L
+    @Volatile private var lastGeminiCall = 0L
+    @Volatile private var geminiCooldownUntil = 0L
     private val minGeminiGap = 3500L     // ~17 req/min ceiling (free-tier friendly)
     private val geminiCooldown = 45000L  // back off this long after a 429
     private val geminiCache = object : LinkedHashMap<String, Pair<String, String>>(64, 0.75f, true) {
@@ -607,7 +608,7 @@ class OverlayService : LifecycleService() {
     // ── Capture → OCR → translate → speak ──
     private fun startLoop() {
         if (captureJob?.isActive == true) return
-        recentSpoken.clear()
+        synchronized(recentSpoken) { recentSpoken.clear() }
         captureJob = lifecycleScope.launch(Dispatchers.Default) {
             var pending = ""
             var stable = 0
