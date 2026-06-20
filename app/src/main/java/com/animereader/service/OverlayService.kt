@@ -717,11 +717,18 @@ class OverlayService : LifecycleService() {
             }.getOrNull()
         }
 
+        // A "translation" only counts if it actually differs from the source. ML Kit (and Gemini)
+        // sometimes echo the original back for untranslatable bubbles (names, onomatopoeia, OCR
+        // noise) — speaking that French text with the *target* voice is what made some bubbles
+        // show French yet be read by the English voice. Treat a near-echo as "no translation".
+        if (translated != null && isEchoOfOriginal(translated!!, original)) translated = null
+
         val toSpeak = translated ?: original
         if (s.ttsEnabled) {
             val provider: VoiceProvider =
                 if (s.voiceMethod == VoiceMethod.ONLINE) edgeVoice else deviceTts
-            val langTag = if (translated != null) s.lang else detectSpokenLang(original)
+            // The voice language must match the text we actually speak, not the requested target.
+            val langTag = if (translated != null) s.lang else detectSpokenLang(toSpeak)
             currentSpeechId = toSpeak.hashCode().toString()
             provider.speak(toSpeak, langTag, s.speed, s.timbre)
         }
@@ -747,6 +754,18 @@ class OverlayService : LifecycleService() {
     /** When reading untranslated source, pick a voice language: CJK -> Japanese, else French. */
     private fun detectSpokenLang(text: String): String =
         if (text.any { it.code in 0x3000..0x9FFF || it.code in 0xFF00..0xFFEF }) "ja" else "fr"
+
+    /**
+     * True when a "translation" is really just the source echoed back — i.e. the provider couldn't
+     * translate the bubble. Such text isn't a translation, so we must neither label it as one nor
+     * read it with the target voice.
+     */
+    private fun isEchoOfOriginal(translated: String, original: String): Boolean {
+        val a = normalizeText(translated)
+        val b = normalizeText(original)
+        if (a.isEmpty()) return true
+        return a == b || bigramSimilarity(a, b) >= 0.80
+    }
 
     private fun toastThrottled(msg: String) {
         val now = System.currentTimeMillis()
