@@ -86,6 +86,9 @@ object EdgeProtocol {
             "es" -> if (male) "es-ES-AlvaroNeural" else "es-ES-ElviraNeural"
             "ja" -> if (male) "ja-JP-KeitaNeural" else "ja-JP-NanamiNeural"
             "pt" -> if (male) "pt-BR-AntonioNeural" else "pt-BR-FranciscaNeural"
+            "de" -> if (male) "de-DE-ConradNeural" else "de-DE-KatjaNeural"
+            "it" -> if (male) "it-IT-DiegoNeural" else "it-IT-ElsaNeural"
+            "ko" -> if (male) "ko-KR-InJoonNeural" else "ko-KR-SunHiNeural"
             else -> if (male) "en-US-GuyNeural" else "en-US-AriaNeural"
         }
     }

@@ -144,7 +144,7 @@ fun SettingsSheet(
                 }
             }
 
-            GroupLabel("IA en ligne (Gemini)")
+            GroupLabel("IA en ligne")
             Card {
                 Column(Modifier.fillMaxWidth().padding(vertical = 12.dp)) {
                     OutlinedTextField(
@@ -157,6 +157,22 @@ fun SettingsSheet(
                     )
                     Text(
                         "Gratuite sur aistudio.google.com · stockée sur l'appareil · pour l'OCR + traduction en ligne. La voix en ligne (edge-tts) ne nécessite pas de clé.",
+                        color = pal.textMuted, fontSize = fs(11.5f),
+                        modifier = Modifier.padding(top = 8.dp),
+                    )
+                }
+                Divider()
+                Column(Modifier.fillMaxWidth().padding(vertical = 12.dp)) {
+                    OutlinedTextField(
+                        value = settings.mistralKey,
+                        onValueChange = { v -> onUpdate { it.copy(mistralKey = v.trim()) } },
+                        label = { Text("Clé API Mistral (secours, optionnelle)") },
+                        singleLine = true,
+                        visualTransformation = PasswordVisualTransformation(),
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                    Text(
+                        "Gratuite sur console.mistral.ai (tier Experiment) · prend le relais automatiquement quand le quota Gemini est atteint.",
                         color = pal.textMuted, fontSize = fs(11.5f),
                         modifier = Modifier.padding(top = 8.dp),
                     )
@@ -273,19 +289,25 @@ private fun <T> ProviderRow(
 @Composable
 private fun LangGridMini(selected: String, onSelect: (String) -> Unit) {
     val pal = LocalPalette.current; val style = LocalDirStyle.current
-    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-        Catalog.languages.forEach { l ->
-            val on = l.code == selected
-            Box(
-                Modifier.weight(1f)
-                    .clip(RoundedCornerShape(style.radiusSm))
-                    .background(if (on) pal.accentSoft else pal.surface2)
-                    .border(1.5.dp, if (on) pal.accentBorder else pal.border, RoundedCornerShape(style.radiusSm))
-                    .clickable { onSelect(l.code) }
-                    .padding(vertical = 10.dp),
-                contentAlignment = Alignment.Center,
-            ) {
-                Text(l.tag, color = if (on) pal.accent else pal.text, fontSize = fs(13f), fontWeight = FontWeight.Bold)
+    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+        Catalog.languages.chunked(4).forEach { rowLangs ->
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                rowLangs.forEach { l ->
+                    val on = l.code == selected
+                    Box(
+                        Modifier.weight(1f)
+                            .clip(RoundedCornerShape(style.radiusSm))
+                            .background(if (on) pal.accentSoft else pal.surface2)
+                            .border(1.5.dp, if (on) pal.accentBorder else pal.border, RoundedCornerShape(style.radiusSm))
+                            .clickable { onSelect(l.code) }
+                            .padding(vertical = 10.dp),
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        Text(l.tag, color = if (on) pal.accent else pal.text, fontSize = fs(13f), fontWeight = FontWeight.Bold)
+                    }
+                }
+                // Pad the last row so its cells keep the same width as full rows.
+                repeat(4 - rowLangs.size) { Spacer(Modifier.weight(1f)) }
             }
         }
     }

@@ -32,6 +32,42 @@ class ScreenOcr {
         }
     }
 
+    /**
+     * OCR text blocks with their positions in ORIGINAL bitmap pixels (the pre-processing
+     * upscale is mapped back). Fonts that defeat recognition still get boxed, which is all
+     * the bubble clustering needs.
+     */
+    suspend fun recognizeBlocks(bitmap: Bitmap): List<OcrBlock> {
+        val prepped = MangaImage.prepare(bitmap)
+        val scale = prepped.width.toFloat() / bitmap.width.coerceAtLeast(1)
+        val input = InputImage.fromBitmap(prepped, 0)
+        return try {
+            val ja = runCatching { japanese.process(input).await() }.getOrNull()
+            val jaBlocks = ja?.let { blocksOf(it, scale) }.orEmpty()
+            if (jaBlocks.isNotEmpty()) return jaBlocks
+            val lat = runCatching { latin.process(input).await() }.getOrNull()
+            lat?.let { blocksOf(it, scale) }.orEmpty()
+        } finally {
+            if (prepped !== bitmap) prepped.recycle()
+        }
+    }
+
+    private fun blocksOf(t: Text, scale: Float): List<OcrBlock> {
+        val s = if (scale <= 0f) 1f else scale
+        return t.textBlocks.mapNotNull { block ->
+            val bb = block.boundingBox ?: return@mapNotNull null
+            val text = block.text.replace("\n", " ").replace(Regex("\\s+"), " ").trim()
+            if (text.isBlank()) return@mapNotNull null
+            OcrBlock(
+                text,
+                Box(
+                    (bb.left / s).toInt(), (bb.top / s).toInt(),
+                    (bb.right / s).toInt(), (bb.bottom / s).toInt(),
+                ),
+            )
+        }
+    }
+
     private class Line(val text: String, val box: Rect)
 
     /** Filter furigana/noise (lines far smaller than the median) and order for reading. */

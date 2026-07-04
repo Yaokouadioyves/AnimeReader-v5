@@ -50,6 +50,9 @@ object Catalog {
         Lang("es", "ES", "Espagnol", "Español"),
         Lang("ja", "JA", "Japonais", "日本語"),
         Lang("pt", "PT", "Portugais", "Português"),
+        Lang("de", "DE", "Allemand", "Deutsch"),
+        Lang("it", "IT", "Italien", "Italiano"),
+        Lang("ko", "KO", "Coréen", "한국어"),
     )
 
     fun lang(code: String): Lang = languages.firstOrNull { it.code == code } ?: languages[1]

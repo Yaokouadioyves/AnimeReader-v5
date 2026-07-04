@@ -77,4 +77,7 @@ dependencies {
     implementation(libs.okhttp)
 
     testImplementation("junit:junit:4.13.2")
+    // Real org.json for JVM unit tests (the android.jar one is a stub that throws).
+    testImplementation("org.json:json:20240303")
+    testImplementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:1.8.1")
 }

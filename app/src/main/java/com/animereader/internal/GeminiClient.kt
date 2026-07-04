@@ -24,32 +24,50 @@ object GeminiClient {
      * [imageJpeg] is the captured region; [targetLanguage] is a natural language name (e.g. "anglais").
      */
     fun ocrTranslate(apiKey: String, imageJpeg: ByteArray, targetLanguage: String): Pair<String, String>? {
-        val url = URL("$BASE/$VISION_MODEL:generateContent?key=$apiKey")
-        val conn = (url.openConnection() as HttpURLConnection).apply {
-            requestMethod = "POST"; doOutput = true
-            setRequestProperty("Content-Type", "application/json")
-            connectTimeout = 15000; readTimeout = 30000
-        }
-        val b64 = Base64.encodeToString(imageJpeg, Base64.NO_WRAP)
         val prompt =
             "Tu es un moteur OCR de manga expert (japonais vertical, lettrage stylisé, furigana). " +
                 "Lis uniquement le texte des bulles dans cette image, corrige les erreurs d'OCR, puis " +
                 "traduis en $targetLanguage de manière naturelle et fidèle au ton. Réponds STRICTEMENT en JSON " +
                 "{\"original\":\"<texte source>\",\"translation\":\"<traduction>\"}. Aucun texte lisible -> chaînes vides."
+        return VisionJson.parseSingle(generateVision(apiKey, prompt, listOf(imageJpeg)))
+    }
+
+    /** One call for a whole page: reads+translates every bubble crop, in the given order. */
+    fun ocrTranslateBatch(apiKey: String, imagesJpeg: List<ByteArray>, targetLanguage: String): List<Pair<String, String>> {
+        if (imagesJpeg.isEmpty()) return emptyList()
+        val prompt =
+            "Voici ${imagesJpeg.size} images, chacune est une bulle de manga (lettrage stylisé possible). " +
+                "Pour CHAQUE image, dans le même ordre : lis le texte, corrige les erreurs d'OCR, puis traduis en " +
+                "$targetLanguage naturellement. Réponds STRICTEMENT en JSON " +
+                "{\"bubbles\":[{\"original\":\"…\",\"translation\":\"…\"}, …]} avec exactement ${imagesJpeg.size} éléments. " +
+                "Image illisible -> chaînes vides."
+        return VisionJson.parseBatch(generateVision(apiKey, prompt, imagesJpeg))
+    }
+
+    /** POSTs a vision generateContent with N images + a prompt; returns the model text. */
+    private fun generateVision(apiKey: String, prompt: String, imagesJpeg: List<ByteArray>): String {
+        val url = URL("$BASE/$VISION_MODEL:generateContent?key=$apiKey")
+        val conn = (url.openConnection() as HttpURLConnection).apply {
+            requestMethod = "POST"; doOutput = true
+            setRequestProperty("Content-Type", "application/json")
+            connectTimeout = 15000; readTimeout = 45000
+        }
+        val parts = JSONArray()
+        imagesJpeg.forEach { jpeg ->
+            val b64 = Base64.encodeToString(jpeg, Base64.NO_WRAP)
+            parts.put(JSONObject().put("inlineData", JSONObject().put("mimeType", "image/jpeg").put("data", b64)))
+        }
+        parts.put(JSONObject().put("text", prompt))
         val body = JSONObject().apply {
-            put("contents", JSONArray().put(JSONObject().put("parts", JSONArray()
-                .put(JSONObject().put("inlineData", JSONObject().put("mimeType", "image/jpeg").put("data", b64)))
-                .put(JSONObject().put("text", prompt)))))
+            put("contents", JSONArray().put(JSONObject().put("parts", parts)))
             put("generationConfig", JSONObject().put("responseMimeType", "application/json").put("temperature", 0.2))
         }
         conn.outputStream.use { it.write(body.toString().toByteArray(Charsets.UTF_8)) }
         if (conn.responseCode != 200) { conn.disconnect(); throw IOException("Gemini OCR HTTP ${conn.responseCode}") }
         val resp = conn.inputStream.bufferedReader().use { it.readText() }
         conn.disconnect()
-        val text = JSONObject(resp).getJSONArray("candidates").getJSONObject(0)
+        return JSONObject(resp).getJSONArray("candidates").getJSONObject(0)
             .getJSONObject("content").getJSONArray("parts").getJSONObject(0).getString("text")
-        val obj = JSONObject(text)
-        return obj.optString("original", "") to obj.optString("translation", "")
     }
 
     /** Output is signed 16-bit PCM, mono, 24 kHz. */
