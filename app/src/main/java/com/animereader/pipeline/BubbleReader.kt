@@ -14,16 +14,20 @@ data class ReadLine(val original: String, val translated: String?, val provider:
 /** One detected bubble: the on-device OCR text + its JPEG crop (null = no upload possible). */
 class PageBubble(val mlkitText: String, val jpeg: ByteArray?)
 
-/** A vision OCR+translate call. Throws on HTTP errors; the message carries the status code. */
+/**
+ * A vision OCR+translate call. [dialogueContext] carries the last few lines of the
+ * conversation so pronouns/tone stay coherent across bubbles. Throws on HTTP errors;
+ * the message carries the status code.
+ */
 fun interface VisionOcrCall {
     @Throws(Exception::class)
-    fun call(jpeg: ByteArray, targetLanguage: String): Pair<String, String>?
+    fun call(jpeg: ByteArray, targetLanguage: String, dialogueContext: String): Pair<String, String>?
 }
 
 /** Same, for a whole page of bubble crops in one request (answers in input order). */
 fun interface VisionBatchCall {
     @Throws(Exception::class)
-    fun call(jpegs: List<ByteArray>, targetLanguage: String): List<Pair<String, String>>
+    fun call(jpegs: List<ByteArray>, targetLanguage: String, dialogueContext: String): List<Pair<String, String>>
 }
 
 /**
@@ -33,7 +37,8 @@ fun interface VisionBatchCall {
  */
 class BubbleReader(
     private val backends: List<Backend>,
-    private val offlineTranslate: suspend (text: String, targetCode: String) -> String?,
+    /** Text-only fallback translator chain; returns (translation, providerName) or null. */
+    private val textTranslate: suspend (text: String, targetCode: String) -> Pair<String, String>?,
     private val clock: () -> Long = System::currentTimeMillis,
     private val onNotice: (String) -> Unit = {},
 ) {
@@ -53,6 +58,21 @@ class BubbleReader(
         override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, CacheEntry>?) = size > 60
     }
 
+    // Rolling dialogue memory fed back into the vision prompts for coherent translations.
+    private val dialogueLock = Any()
+    private val dialogue = ArrayDeque<String>()
+
+    private fun rememberLine(original: String, translated: String?) {
+        if (original.isBlank()) return
+        synchronized(dialogueLock) {
+            dialogue.addLast(if (translated.isNullOrBlank()) original else "$original => $translated")
+            while (dialogue.size > 6) dialogue.removeFirst()
+        }
+    }
+
+    private fun dialogueContext(): String =
+        synchronized(dialogueLock) { dialogue.takeLast(4).joinToString("\n") }
+
     /** Read one bubble: cache → first available online backend → offline translation. */
     suspend fun read(mlkitText: String, jpeg: ByteArray?, target: TargetLang): ReadLine {
         val key = cacheKey(mlkitText, target)
@@ -65,10 +85,11 @@ class BubbleReader(
         var provider: String? = null
 
         if (jpeg != null) {
+            val ctx = dialogueContext()
             for (b in backends) {
                 if (!b.available()) continue
                 if (!b.gate.tryAcquire(clock())) continue
-                val r = runCatching { withContext(Dispatchers.IO) { b.single.call(jpeg, target.promptName) } }
+                val r = runCatching { withContext(Dispatchers.IO) { b.single.call(jpeg, target.promptName, ctx) } }
                 val err = r.exceptionOrNull()
                 if (err is kotlinx.coroutines.CancellationException) throw err
                 if (err != null) { reportError(b, err); continue }
@@ -84,10 +105,13 @@ class BubbleReader(
         }
 
         if (translated == null && target.code != "fr") {
-            translated = runCatching { offlineTranslate(original, target.code) }.getOrNull()
-                ?.takeIf { it.isNotBlank() && !it.equals(original, ignoreCase = true) }
-            if (translated != null && provider == null) provider = "ML Kit"
+            val t = runCatching { textTranslate(original, target.code) }.getOrNull()
+            if (t != null && t.first.isNotBlank() && !t.first.equals(original, ignoreCase = true)) {
+                translated = t.first
+                if (provider == null) provider = t.second
+            }
         }
+        rememberLine(original, translated)
         return ReadLine(original, translated, provider)
     }
 
@@ -111,11 +135,12 @@ class BubbleReader(
         }
 
         if (missing.isNotEmpty()) {
+            val ctx = dialogueContext()
             for (b in backends) {
                 if (!b.available()) continue
                 if (!b.gate.tryAcquire(clock())) continue
                 val jpegs = missing.map { bubbles[it].jpeg!! }
-                val r = runCatching { withContext(Dispatchers.IO) { b.batch.call(jpegs, target.promptName) } }
+                val r = runCatching { withContext(Dispatchers.IO) { b.batch.call(jpegs, target.promptName, ctx) } }
                 val err = r.exceptionOrNull()
                 if (err is kotlinx.coroutines.CancellationException) throw err
                 if (err != null) { reportError(b, err); continue }
@@ -135,12 +160,15 @@ class BubbleReader(
         }
 
         return bubbles.indices.map { i ->
-            val line = results[i] ?: ReadLine(bubbles[i].mlkitText, null, null)
+            var line = results[i] ?: ReadLine(bubbles[i].mlkitText, null, null)
             if (line.translated == null && target.code != "fr" && line.original.isNotBlank()) {
-                val t = runCatching { offlineTranslate(line.original, target.code) }.getOrNull()
-                    ?.takeIf { it.isNotBlank() && !it.equals(line.original, ignoreCase = true) }
-                if (t != null) ReadLine(line.original, t, line.provider ?: "ML Kit") else line
-            } else line
+                val t = runCatching { textTranslate(line.original, target.code) }.getOrNull()
+                if (t != null && t.first.isNotBlank() && !t.first.equals(line.original, ignoreCase = true)) {
+                    line = ReadLine(line.original, t.first, line.provider ?: t.second)
+                }
+            }
+            if (i in missing) rememberLine(line.original, line.translated)
+            line
         }
     }
 

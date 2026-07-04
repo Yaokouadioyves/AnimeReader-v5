@@ -18,17 +18,18 @@ class BubbleReaderTest {
     ) {
         var singleCalls = 0
         var batchCalls = 0
+        val contexts = mutableListOf<String>()
 
         fun asBackend(name: String, gate: RateGate = RateGate(0, 45_000)) = BubbleReader.Backend(
             name = name,
             available = { true },
-            single = VisionOcrCall { _, _ ->
-                singleCalls++
+            single = VisionOcrCall { _, _, ctx ->
+                singleCalls++; contexts.add(ctx)
                 fail?.let { throw it }
                 answer("0")
             },
-            batch = VisionBatchCall { jpegs, _ ->
-                batchCalls++
+            batch = VisionBatchCall { jpegs, _, ctx ->
+                batchCalls++; contexts.add(ctx)
                 fail?.let { throw it }
                 List(jpegs.size) { i -> answer(i.toString())!! }
             },
@@ -38,7 +39,7 @@ class BubbleReaderTest {
 
     private fun reader(
         vararg backends: BubbleReader.Backend,
-        offline: suspend (String, String) -> String? = { t, _ -> "ML[$t]" },
+        offline: suspend (String, String) -> Pair<String, String>? = { t, _ -> "ML[$t]" to "ML Kit" },
         clock: () -> Long = { 1_000_000L },
     ) = BubbleReader(backends.toList(), offline, clock)
 
@@ -91,6 +92,16 @@ class BubbleReaderTest {
         val line = r.read("bonjour", jpeg, target)
         assertEquals("Bonjour", line.original)
         assertNull(line.translated)
+    }
+
+    @Test
+    fun `the previous lines feed the next call as dialogue context`() = runBlocking {
+        val gemini = FakeBackend(answer = { "Salut Léa" to "Hi Lea" })
+        val r = reader(gemini.asBackend("Gemini"))
+        r.read("salut lea", jpeg, target)
+        r.read("une autre bulle", jpeg, target)
+        assertEquals("", gemini.contexts[0])                       // nothing before the first line
+        assertEquals("Salut Léa => Hi Lea", gemini.contexts[1])    // then the dialogue memory
     }
 
     @Test

@@ -20,8 +20,8 @@ object MistralClient {
     const val VISION_MODEL = "mistral-small-latest" // vision-capable + free-tier eligible
 
     /** Manga OCR + translation in one vision call. Returns (original, translation) or null. */
-    fun ocrTranslate(apiKey: String, imageJpeg: ByteArray, targetLanguage: String): Pair<String, String>? {
-        val prompt =
+    fun ocrTranslate(apiKey: String, imageJpeg: ByteArray, targetLanguage: String, dialogueContext: String = ""): Pair<String, String>? {
+        val prompt = contextBlock(dialogueContext) +
             "Tu es un moteur OCR de manga expert (lettrage stylisé, polices fantaisistes). " +
                 "Lis uniquement le texte des bulles dans cette image, corrige les erreurs d'OCR, puis " +
                 "traduis en $targetLanguage de manière naturelle et fidèle au ton. Réponds STRICTEMENT en JSON " +
@@ -31,9 +31,9 @@ object MistralClient {
     }
 
     /** One call for a whole page: reads+translates every bubble crop, in the given order. */
-    fun ocrTranslateBatch(apiKey: String, imagesJpeg: List<ByteArray>, targetLanguage: String): List<Pair<String, String>> {
+    fun ocrTranslateBatch(apiKey: String, imagesJpeg: List<ByteArray>, targetLanguage: String, dialogueContext: String = ""): List<Pair<String, String>> {
         if (imagesJpeg.isEmpty()) return emptyList()
-        val prompt =
+        val prompt = contextBlock(dialogueContext) +
             "Voici ${imagesJpeg.size} images, chacune est une bulle de manga (lettrage stylisé possible). " +
                 "Pour CHAQUE image, dans le même ordre : lis le texte, corrige les erreurs d'OCR, puis traduis en " +
                 "$targetLanguage naturellement. Réponds STRICTEMENT en JSON " +
@@ -42,6 +42,12 @@ object MistralClient {
         val text = chatVision(apiKey, prompt, imagesJpeg)
         return VisionJson.parseBatch(text)
     }
+
+    /** The last dialogue lines, injected for coherent pronouns/tone across bubbles. */
+    private fun contextBlock(dialogueContext: String): String =
+        if (dialogueContext.isBlank()) ""
+        else "Contexte — répliques précédentes du dialogue (original => traduction), pour garder " +
+            "pronoms, ton et vocabulaire cohérents :\n$dialogueContext\n\n"
 
     /** POSTs a vision chat completion; returns the assistant text. Throws on HTTP errors. */
     private fun chatVision(apiKey: String, prompt: String, imagesJpeg: List<ByteArray>): String {

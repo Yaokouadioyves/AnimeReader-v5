@@ -23,8 +23,8 @@ object GeminiClient {
      * Manga OCR + translation in one vision call. Returns (original, translation) or null on error.
      * [imageJpeg] is the captured region; [targetLanguage] is a natural language name (e.g. "anglais").
      */
-    fun ocrTranslate(apiKey: String, imageJpeg: ByteArray, targetLanguage: String): Pair<String, String>? {
-        val prompt =
+    fun ocrTranslate(apiKey: String, imageJpeg: ByteArray, targetLanguage: String, dialogueContext: String = ""): Pair<String, String>? {
+        val prompt = contextBlock(dialogueContext) +
             "Tu es un moteur OCR de manga expert (japonais vertical, lettrage stylisé, furigana). " +
                 "Lis uniquement le texte des bulles dans cette image, corrige les erreurs d'OCR, puis " +
                 "traduis en $targetLanguage de manière naturelle et fidèle au ton. Réponds STRICTEMENT en JSON " +
@@ -33,9 +33,9 @@ object GeminiClient {
     }
 
     /** One call for a whole page: reads+translates every bubble crop, in the given order. */
-    fun ocrTranslateBatch(apiKey: String, imagesJpeg: List<ByteArray>, targetLanguage: String): List<Pair<String, String>> {
+    fun ocrTranslateBatch(apiKey: String, imagesJpeg: List<ByteArray>, targetLanguage: String, dialogueContext: String = ""): List<Pair<String, String>> {
         if (imagesJpeg.isEmpty()) return emptyList()
-        val prompt =
+        val prompt = contextBlock(dialogueContext) +
             "Voici ${imagesJpeg.size} images, chacune est une bulle de manga (lettrage stylisé possible). " +
                 "Pour CHAQUE image, dans le même ordre : lis le texte, corrige les erreurs d'OCR, puis traduis en " +
                 "$targetLanguage naturellement. Réponds STRICTEMENT en JSON " +
@@ -43,6 +43,12 @@ object GeminiClient {
                 "Image illisible -> chaînes vides."
         return VisionJson.parseBatch(generateVision(apiKey, prompt, imagesJpeg))
     }
+
+    /** The last dialogue lines, injected for coherent pronouns/tone across bubbles. */
+    private fun contextBlock(dialogueContext: String): String =
+        if (dialogueContext.isBlank()) ""
+        else "Contexte — répliques précédentes du dialogue (original => traduction), pour garder " +
+            "pronoms, ton et vocabulaire cohérents :\n$dialogueContext\n\n"
 
     /** POSTs a vision generateContent with N images + a prompt; returns the model text. */
     private fun generateVision(apiKey: String, prompt: String, imagesJpeg: List<ByteArray>): String {

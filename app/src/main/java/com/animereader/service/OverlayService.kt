@@ -57,6 +57,7 @@ import com.animereader.pipeline.ReadLine
 import com.animereader.pipeline.TargetLang
 import com.animereader.pipeline.VisionBatchCall
 import com.animereader.pipeline.VisionOcrCall
+import com.animereader.translate.GoogleWebTranslator
 import com.animereader.translate.Translators
 import com.animereader.tts.DeviceTts
 import com.animereader.tts.EdgeVoice
@@ -105,6 +106,7 @@ class OverlayService : LifecycleService() {
     private lateinit var reader: BubbleReader
     private lateinit var speech: SpeechQueue
     private val apiKeys = ApiKeys()
+    private val googleWeb = GoogleWebTranslator()
 
     private var projection: MediaProjection? = null
     private var capturer: ScreenCapturer? = null
@@ -163,22 +165,29 @@ class OverlayService : LifecycleService() {
                 BubbleReader.Backend(
                     name = "Gemini",
                     available = { settings.method == TranslationMethod.ONLINE && settings.geminiKey.isNotBlank() },
-                    single = VisionOcrCall { jpeg, lang -> GeminiClient.ocrTranslate(settings.geminiKey, jpeg, lang) },
-                    batch = VisionBatchCall { jpegs, lang -> GeminiClient.ocrTranslateBatch(settings.geminiKey, jpegs, lang) },
+                    single = VisionOcrCall { jpeg, lang, ctx -> GeminiClient.ocrTranslate(settings.geminiKey, jpeg, lang, ctx) },
+                    batch = VisionBatchCall { jpegs, lang, ctx -> GeminiClient.ocrTranslateBatch(settings.geminiKey, jpegs, lang, ctx) },
                     gate = RateGate(minGapMs = 3500L, cooldownMs = 45000L), // ~17 req/min ceiling, 45s after a 429
                 ),
                 BubbleReader.Backend(
                     name = "Mistral",
                     available = { settings.method == TranslationMethod.ONLINE && settings.mistralKey.isNotBlank() },
-                    single = VisionOcrCall { jpeg, lang -> MistralClient.ocrTranslate(settings.mistralKey, jpeg, lang) },
-                    batch = VisionBatchCall { jpegs, lang -> MistralClient.ocrTranslateBatch(settings.mistralKey, jpegs, lang) },
+                    single = VisionOcrCall { jpeg, lang, ctx -> MistralClient.ocrTranslate(settings.mistralKey, jpeg, lang, ctx) },
+                    batch = VisionBatchCall { jpegs, lang, ctx -> MistralClient.ocrTranslateBatch(settings.mistralKey, jpegs, lang, ctx) },
                     gate = RateGate(minGapMs = 1500L, cooldownMs = 45000L),
                 ),
             ),
-            offlineTranslate = { text, code ->
-                runCatching {
+            // Text fallback chain: keyless Google web translate (cloud NMT — the quality the
+            // screen-translate apps are known for) when online, then on-device ML Kit.
+            textTranslate = { text, code ->
+                val viaGoogle =
+                    if (settings.method == TranslationMethod.ONLINE)
+                        runCatching { googleWeb.translate(text, code) }.getOrNull()
+                    else null
+                if (viaGoogle != null) viaGoogle to "Google"
+                else runCatching {
                     Translators.create(TranslationMethod.OFFLINE, settings.provider, apiKeys).translate(text, code)
-                }.getOrNull()
+                }.getOrNull()?.let { it to "ML Kit" }
             },
             onNotice = { msg -> toastThrottled(msg) },
         )
