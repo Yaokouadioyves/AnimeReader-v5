@@ -48,8 +48,11 @@ class EdgeProtocolTest {
         assertEquals("fr-FR-HenriNeural", EdgeProtocol.voiceFor("fr", "Masculine"))
         assertEquals("fr-FR-DeniseNeural", EdgeProtocol.voiceFor("fr-FR", "Feminine"))
         assertEquals("en-US-AriaNeural", EdgeProtocol.voiceFor("en", "Feminine"))
+        assertEquals("de-DE-ConradNeural", EdgeProtocol.voiceFor("de", "Masculine"))
+        assertEquals("it-IT-ElsaNeural", EdgeProtocol.voiceFor("it", "Feminine"))
+        assertEquals("ko-KR-SunHiNeural", EdgeProtocol.voiceFor("ko-KR", "Feminine"))
         // Unknown language falls back to English.
-        assertEquals("en-US-GuyNeural", EdgeProtocol.voiceFor("de", "Masculine"))
+        assertEquals("en-US-GuyNeural", EdgeProtocol.voiceFor("xx", "Masculine"))
     }
 
     @Test fun configMessage_requestsMp3() {
