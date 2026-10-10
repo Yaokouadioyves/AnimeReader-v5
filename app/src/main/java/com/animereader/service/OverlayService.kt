@@ -136,7 +136,8 @@ class OverlayService : LifecycleService() {
     private var playing = false
     @Volatile private var interacting = false
     @Volatile private var lastSpeechId: String? = null
-    private var lastOcrErr = 0L
+    // Written from the capture loop and replay coroutines → keep visibility across threads.
+    @Volatile private var lastOcrErr = 0L
     private val recentSpoken = ArrayDeque<String>()
     private val stableFrames = 2
     @Volatile private var lastGrid: IntArray? = null
@@ -747,7 +748,7 @@ class OverlayService : LifecycleService() {
     // ── Capture → bubbles → OCR → translate → speak ──
     private fun startLoop() {
         if (captureJob?.isActive == true) return
-        recentSpoken.clear()
+        synchronized(recentSpoken) { recentSpoken.clear() }
         lastGrid = null
         captureJob = lifecycleScope.launch(Dispatchers.Default) {
             var pending = ""

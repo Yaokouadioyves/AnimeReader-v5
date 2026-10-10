@@ -24,6 +24,9 @@ class ScreenCapturer(
     private var virtualDisplay: VirtualDisplay? = null
     private val thread = HandlerThread("ar-capture").apply { start() }
     private val handler = Handler(thread.looper)
+    // Serializes concurrent captures (read loop + replay + online path) so we never exceed the
+    // ImageReader's max-images quota by acquiring from several threads at once.
+    private val captureLock = Any()
 
     fun start() {
         val reader = ImageReader.newInstance(width, height, PixelFormat.RGBA_8888, 2)
@@ -36,7 +39,7 @@ class ScreenCapturer(
     }
 
     /** Capture the latest frame and crop to [region] (screen pixels). Null if no frame yet. */
-    fun captureRegion(region: Rect?): Bitmap? {
+    fun captureRegion(region: Rect?): Bitmap? = synchronized(captureLock) {
         val reader = imageReader ?: return null
         val image = reader.acquireLatestImage() ?: return null
         try {
@@ -48,16 +51,20 @@ class ScreenCapturer(
             val bmpWidth = image.width + rowPadding / pixelStride
             var bmp = Bitmap.createBitmap(bmpWidth, image.height, Bitmap.Config.ARGB_8888)
             bmp.copyPixelsFromBuffer(buffer)
-            // Drop the row padding.
+            // Drop the row padding (recycle the padded intermediate so it isn't left to the GC).
             if (bmpWidth != image.width) {
-                bmp = Bitmap.createBitmap(bmp, 0, 0, image.width, image.height)
+                val cropped = Bitmap.createBitmap(bmp, 0, 0, image.width, image.height)
+                if (cropped !== bmp) bmp.recycle()
+                bmp = cropped
             }
             if (region != null) {
                 val l = region.left.coerceIn(0, image.width - 1)
                 val t = region.top.coerceIn(0, image.height - 1)
                 val r = region.right.coerceIn(l + 1, image.width)
                 val b = region.bottom.coerceIn(t + 1, image.height)
-                bmp = Bitmap.createBitmap(bmp, l, t, r - l, b - t)
+                val sub = Bitmap.createBitmap(bmp, l, t, r - l, b - t)
+                if (sub !== bmp) bmp.recycle()
+                bmp = sub
             }
             return bmp
         } catch (e: Exception) {

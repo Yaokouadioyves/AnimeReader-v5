@@ -68,12 +68,18 @@ object GeminiClient {
             put("contents", JSONArray().put(JSONObject().put("parts", parts)))
             put("generationConfig", JSONObject().put("responseMimeType", "application/json").put("temperature", 0.2))
         }
-        conn.outputStream.use { it.write(body.toString().toByteArray(Charsets.UTF_8)) }
-        if (conn.responseCode != 200) { conn.disconnect(); throw IOException("Gemini OCR HTTP ${conn.responseCode}") }
-        val resp = conn.inputStream.bufferedReader().use { it.readText() }
-        conn.disconnect()
-        return JSONObject(resp).getJSONArray("candidates").getJSONObject(0)
-            .getJSONObject("content").getJSONArray("parts").getJSONObject(0).getString("text")
+        try {
+            conn.outputStream.use { it.write(body.toString().toByteArray(Charsets.UTF_8)) }
+            if (conn.responseCode != 200) {
+                conn.errorStream?.use { it.readBytes() }  // drain the error body so the socket can be reused
+                throw IOException("Gemini OCR HTTP ${conn.responseCode}")
+            }
+            val resp = conn.inputStream.bufferedReader().use { it.readText() }
+            return JSONObject(resp).getJSONArray("candidates").getJSONObject(0)
+                .getJSONObject("content").getJSONArray("parts").getJSONObject(0).getString("text")
+        } finally {
+            conn.disconnect()
+        }
     }
 
     /** Output is signed 16-bit PCM, mono, 24 kHz. */
@@ -109,13 +115,12 @@ object GeminiClient {
                         JSONObject().put("voiceName", voiceName))))
             })
         }
-        conn.outputStream.use { it.write(body.toString().toByteArray(Charsets.UTF_8)) }
-
-        if (conn.responseCode != 200) {
-            conn.disconnect()
-            throw IOException("Gemini TTS HTTP ${conn.responseCode}")
-        }
         try {
+            conn.outputStream.use { it.write(body.toString().toByteArray(Charsets.UTF_8)) }
+            if (conn.responseCode != 200) {
+                conn.errorStream?.use { it.readBytes() }  // drain the error body so the socket can be reused
+                throw IOException("Gemini TTS HTTP ${conn.responseCode}")
+            }
             conn.inputStream.bufferedReader().use { reader ->
                 while (true) {
                     if (!isActive()) break

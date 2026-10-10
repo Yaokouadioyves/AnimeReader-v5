@@ -175,9 +175,17 @@ class BubbleReader(
     private fun cacheKey(mlkitText: String, target: TargetLang) =
         "${target.code}|${TextDedup.normalize(mlkitText)}"
 
-    /** Vision models sometimes echo the source instead of translating — treat that as no translation. */
-    private fun sanitize(original: String, translation: String): String? =
-        translation.takeIf { it.isNotBlank() && !it.equals(original, ignoreCase = true) }
+    /**
+     * Providers sometimes echo the source back (names, onomatopoeia, OCR noise) instead of
+     * translating. A near-echo is not a translation: labelling it as one made French bubbles get
+     * read by the target-language voice — so treat it as "no translation".
+     */
+    private fun sanitize(original: String, translation: String): String? {
+        val t = TextDedup.normalize(translation)
+        if (t.isEmpty()) return null
+        val o = TextDedup.normalize(original)
+        return if (t == o || TextDedup.bigramSimilarity(t, o) >= 0.80) null else translation
+    }
 
     private fun reportError(b: Backend, e: Throwable) {
         val msg = e.message ?: e.javaClass.simpleName
