@@ -3,6 +3,7 @@ package com.animereader.tts
 import android.content.Context
 import android.speech.tts.TextToSpeech
 import android.speech.tts.UtteranceProgressListener
+import android.speech.tts.Voice
 import android.util.Log
 import kotlinx.coroutines.delay
 import java.util.Locale
@@ -10,6 +11,8 @@ import java.util.Locale
 /** Speak a line of text. */
 interface VoiceProvider {
     suspend fun speak(text: String, langTag: String, rate: Float, timbre: String)
+    /** Hint that [text] will be spoken soon (online voices synthesize it ahead of time). */
+    fun prefetch(text: String, langTag: String, rate: Float, timbre: String) {}
     fun stop()
     fun shutdown()
 }
@@ -36,15 +39,39 @@ class DeviceTts(context: Context) : VoiceProvider {
         while (!ready && tries < 60) { delay(50); tries++ }
         if (!ready) { Log.w(TAG, "TTS non initialisé"); return }
         val locale = Locale.forLanguageTag(langTag)
-        if (tts.isLanguageAvailable(locale) >= TextToSpeech.LANG_AVAILABLE) tts.language = locale
+        if (tts.isLanguageAvailable(locale) >= TextToSpeech.LANG_AVAILABLE) {
+            tts.language = locale
+            bestVoice(locale)?.let { runCatching { tts.voice = it } }
+        }
         tts.setSpeechRate(rate.coerceIn(0.5f, 2f))
         // Timbre maps loosely to pitch (device voices vary).
         tts.setPitch(when (timbre) { "Masculine" -> 0.85f; "Neutre" -> 1.0f; else -> 1.1f })
         tts.speak(text, TextToSpeech.QUEUE_FLUSH, null, text.hashCode().toString())
     }
 
+    /**
+     * The engine's default voice for a language is often a low-quality or network one; prefer the
+     * best installed offline voice (same language, highest quality, lowest latency).
+     */
+    private fun bestVoice(locale: Locale): Voice? = runCatching {
+        tts.voices.orEmpty()
+            .filter { it.locale.language == locale.language && !it.isNetworkConnectionRequired }
+            .filter { KEY_NOT_INSTALLED !in it.features.orEmpty() }
+            .sortedWith(
+                compareByDescending<Voice> { it.locale.country == locale.country || it.locale.country == defaultCountry(locale.language) }
+                    .thenByDescending { it.quality }
+                    .thenBy { it.latency }
+            )
+            .firstOrNull()
+    }.getOrNull()
+
+    private fun defaultCountry(lang: String) = when (lang) { "fr" -> "FR"; "en" -> "US"; "pt" -> "BR"; else -> lang.uppercase() }
+
     override fun stop() { runCatching { tts.stop() } }
     override fun shutdown() { runCatching { tts.shutdown() } }
 
-    companion object { private const val TAG = "AnimeReader/TTS" }
+    companion object {
+        private const val TAG = "AnimeReader/TTS"
+        private const val KEY_NOT_INSTALLED = "notInstalled" // TextToSpeech.Engine.KEY_FEATURE_NOT_INSTALLED
+    }
 }

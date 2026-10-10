@@ -82,4 +82,14 @@ class SpeechQueueTest {
         runCurrent()
         assertEquals(listOf("a"), started)
     }
+
+    @Test
+    fun `every queued item is offered for prefetch right away`() = runTest {
+        val prefetched = mutableListOf<String>()
+        val q = SpeechQueue(scope = this, speak = {}, prefetch = { prefetched.add(it.id) })
+        q.enqueue(item("a")); q.enqueue(item("b")); q.enqueue(item("c"))
+        // b and c are prepared while a is still being spoken.
+        assertEquals(listOf("a", "b", "c"), prefetched)
+        q.clear(); runCurrent()
+    }
 }

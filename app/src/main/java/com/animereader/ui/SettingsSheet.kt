@@ -58,7 +58,7 @@ fun SettingsSheet(
     val methodSub = if (settings.method == TranslationMethod.OFFLINE) "ML Kit — sur l'appareil"
         else "Google Traduction (sans clé) · Gemini ou Mistral si une clé est saisie"
     val voiceSub = if (settings.voiceMethod == VoiceMethod.OFFLINE) "Moteur TTS de l'appareil"
-        else "edge-tts — voix Microsoft neurale"
+        else "Voix neurales Microsoft, sans clé · repli sur la voix de l'appareil"
 
     ModalBottomSheet(onDismissRequest = onClose, sheetState = sheetState, containerColor = pal.elev) {
         Column(
@@ -127,7 +127,12 @@ fun SettingsSheet(
                         }
                     }
                     Divider()
-                    Stacked("Timbre", null) {
+                    Stacked(
+                        "Timbre",
+                        if (settings.voiceMethod == VoiceMethod.ONLINE)
+                            "Féminine / Masculine : voix récentes, plus naturelles · Neutre : voix classique"
+                        else null,
+                    ) {
                         Segment(options = Catalog.timbres.map { it to it }, selected = settings.timbre, compact = true) { v ->
                             onUpdate { it.copy(timbre = v) }
                         }

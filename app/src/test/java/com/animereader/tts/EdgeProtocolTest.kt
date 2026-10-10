@@ -41,18 +41,63 @@ class EdgeProtocolTest {
 
     @Test fun langOf_stripsVoiceName() {
         assertEquals("fr-FR", EdgeProtocol.langOf("fr-FR-DeniseNeural"))
+        assertEquals("fr-FR", EdgeProtocol.langOf("fr-FR-VivienneMultilingualNeural"))
         assertEquals("ja-JP", EdgeProtocol.langOf("ja-JP-NanamiNeural"))
     }
 
     @Test fun voiceFor_mapsLanguageAndTimbre() {
-        assertEquals("fr-FR-HenriNeural", EdgeProtocol.voiceFor("fr", "Masculine"))
-        assertEquals("fr-FR-DeniseNeural", EdgeProtocol.voiceFor("fr-FR", "Feminine"))
-        assertEquals("en-US-AriaNeural", EdgeProtocol.voiceFor("en", "Feminine"))
-        assertEquals("de-DE-ConradNeural", EdgeProtocol.voiceFor("de", "Masculine"))
-        assertEquals("it-IT-ElsaNeural", EdgeProtocol.voiceFor("it", "Feminine"))
-        assertEquals("ko-KR-SunHiNeural", EdgeProtocol.voiceFor("ko-KR", "Feminine"))
+        assertEquals("fr-FR-VivienneMultilingualNeural", EdgeProtocol.voiceFor("fr-FR", "Féminine"))
+        assertEquals("fr-FR-RemyMultilingualNeural", EdgeProtocol.voiceFor("fr", "Masculine"))
+        assertEquals("fr-FR-DeniseNeural", EdgeProtocol.voiceFor("fr", "Neutre"))
+        assertEquals("en-US-AvaMultilingualNeural", EdgeProtocol.voiceFor("en", "Féminine"))
+        assertEquals("de-DE-FlorianMultilingualNeural", EdgeProtocol.voiceFor("de", "Masculine"))
+        assertEquals("it-IT-ElsaNeural", EdgeProtocol.voiceFor("it", "Féminine"))
+        assertEquals("ko-KR-SunHiNeural", EdgeProtocol.voiceFor("ko-KR", "Féminine"))
         // Unknown language falls back to English.
-        assertEquals("en-US-GuyNeural", EdgeProtocol.voiceFor("xx", "Masculine"))
+        assertEquals("en-US-AndrewMultilingualNeural", EdgeProtocol.voiceFor("xx", "Masculine"))
+    }
+
+    @Test fun socketUrl_triesTheNewHostFirst() {
+        val first = EdgeProtocol.socketUrl(0, 1_700_000_000_000L)
+        assertTrue(first.startsWith("wss://api.msedgeservices.com/tts/cognitiveservices/websocket/v1?Ocp-Apim-Subscription-Key="))
+        assertTrue(first.contains("&Sec-MS-GEC=" + EdgeProtocol.secMsGec(1_700_000_000_000L)))
+        assertTrue(EdgeProtocol.socketUrl(1).startsWith("wss://speech.platform.bing.com/"))
+        assertTrue(EdgeProtocol.socketUrl(2).startsWith("wss://api.msedgeservices.com/")) // wraps around
+    }
+
+    private fun frame(headers: String, audio: ByteArray): ByteArray {
+        val h = headers.toByteArray(Charsets.US_ASCII)
+        return byteArrayOf((h.size shr 8).toByte(), h.size.toByte()) + h + audio
+    }
+
+    @Test fun audioOffset_skipsLengthPrefixAndHeaders() {
+        // Real frame shape: headers end with CRLF, which used to leak into the MP3 stream.
+        val headers = "X-RequestId:abc\r\nContent-Type:audio/mpeg\r\nPath:audio\r\n"
+        val mp3 = byteArrayOf(0xFF.toByte(), 0xF3.toByte(), 1, 2, 3)
+        val f = frame(headers, mp3)
+        val start = EdgeProtocol.audioOffset(f)
+        assertEquals(mp3.toList(), f.copyOfRange(start, f.size).toList())
+        assertEquals("abc", EdgeProtocol.requestIdOf(EdgeProtocol.frameHeaders(f)))
+    }
+
+    @Test fun audioOffset_rejectsMalformedFrames() {
+        assertEquals(-1, EdgeProtocol.audioOffset(byteArrayOf(0)))
+        assertEquals(-1, EdgeProtocol.audioOffset(byteArrayOf(0, 50, 1, 2)))
+        assertEquals("", EdgeProtocol.frameHeaders(byteArrayOf(0, 50, 1, 2)))
+    }
+
+    @Test fun requestIdOf_readsTextMessages() {
+        val turnEnd = "X-RequestId:c9375\r\nContent-Type:application/json; charset=utf-8\r\nPath:turn.end\r\n\r\n{}"
+        assertEquals("c9375", EdgeProtocol.requestIdOf(turnEnd))
+        assertEquals(null, EdgeProtocol.requestIdOf("Path:turn.end"))
+    }
+
+    @Test fun clockSkewMs_fromHttpDate() {
+        val now = 1_700_000_000_000L // Tue, 14 Nov 2023 22:13:20 GMT
+        assertEquals(0L, EdgeProtocol.clockSkewMs("Tue, 14 Nov 2023 22:13:20 GMT", now))
+        assertEquals(300_000L, EdgeProtocol.clockSkewMs("Tue, 14 Nov 2023 22:18:20 GMT", now))
+        assertEquals(null, EdgeProtocol.clockSkewMs("garbage", now))
+        assertEquals(null, EdgeProtocol.clockSkewMs(null, now))
     }
 
     @Test fun configMessage_requestsMp3() {
@@ -61,7 +106,8 @@ class EdgeProtocolTest {
     }
 
     @Test fun ssmlMessage_escapesXmlAndCarriesVoice() {
-        val m = EdgeProtocol.ssmlMessage("a & b < c > d", "fr-FR-DeniseNeural", "+0%")
+        val m = EdgeProtocol.ssmlMessage("a & b < c > d", "fr-FR-DeniseNeural", "+0%", requestId = "rid42")
+        assertTrue(m.startsWith("X-RequestId:rid42\r\n"))
         assertTrue(m.contains("a &amp; b &lt; c &gt; d"))
         assertTrue(m.contains("fr-FR-DeniseNeural"))
         assertTrue(m.contains("Path:ssml"))

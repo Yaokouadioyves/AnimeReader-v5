@@ -27,6 +27,8 @@ class SpeechQueue(
     private val scope: CoroutineScope,
     private val speak: suspend (SpeechItem) -> Unit,
     private val onItemStart: (SpeechItem) -> Unit = {},
+    /** Called for each newly queued item so an online voice can synthesize it in advance. */
+    private val prefetch: (SpeechItem) -> Unit = {},
     private val maxQueued: Int = 4,
     private val doneTimeoutMs: Long = 30_000,
 ) {
@@ -45,6 +47,7 @@ class SpeechQueue(
             queue.addLast(item)
             while (queue.size > maxQueued) queue.removeFirst()
         }
+        runCatching { prefetch(item) }
         ensureWorker()
     }
 

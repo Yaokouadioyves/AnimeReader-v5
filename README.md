@@ -89,8 +89,10 @@ com.animereader
 │   ├── LangGuess           langue d'une bulle (fr/en/…): traduire ou lire tel quel, voix      [réel]
 │   └── Translators         MlKitTranslator (hors-ligne, réel) + OnlineTranslator (stub, inactif)
 ├── tts/
-│   ├── Voices              VoiceProvider + DeviceTts (TTS appareil, hors-ligne, réel)         [réel]
-│   └── EdgeVoice           voix neurale en ligne via Edge-TTS (WebSocket OkHttp, streaming)   [réel]
+│   ├── Voices              VoiceProvider + DeviceTts (meilleure voix hors-ligne installée)     [réel]
+│   ├── EdgeVoice           voix neurale Edge-TTS : synthèse anticipée, cache, repli appareil   [réel]
+│   ├── EdgeProtocol        protocole Edge (adresses, jeton, trames audio, voix) — testé JVM    [réel]
+│   └── SpeechText          texte parlé nettoyé (« Noooon », « ?!?! », ♪…) — testé JVM          [réel]
 ├── internal/
 │   ├── GeminiClient        client Gemini : OCR+traduction (vision) et TTS streaming (SSE)     [réel]
 │   ├── ApiKeys             clés des stubs, lues depuis BuildConfig (chemin inactif)
@@ -116,8 +118,14 @@ Contrairement aux versions précédentes, les providers en ligne ne sont **plus 
   (japonais vertical, furigana, lettrage stylisé), corrige l'OCR et renvoie un JSON
   `{original, translation}`. Activé quand **méthode de traduction = En ligne** et clé Gemini présente.
 - **Voix neurale en ligne** via **Edge-TTS** (`EdgeVoice`, Microsoft « Read Aloud », gratuit, sans
-  clé) : MP3 en streaming sur WebSocket, lecture `MediaPlayer`, latence ~1 s. Activée quand
-  **méthode de voix = En ligne**.
+  clé), réglage par défaut. Une seule WebSocket réutilisée ; chaque bulle mise en file est
+  **synthétisée à l'avance** pendant que la précédente est lue (pas de blanc entre les bulles),
+  lecture en mémoire via `MediaPlayer`. Timbre Féminine / Masculine = voix « Multilingual »
+  récentes (Vivienne / Rémy en français), Neutre = voix classique (Denise).
+  Depuis le 10/10/2026 Microsoft refuse l'ancienne adresse `speech.platform.bing.com` (403) :
+  `EdgeProtocol.HOSTS` essaie d'abord `api.msedgeservices.com`, corrige un décalage d'horloge
+  du téléphone à partir de l'en-tête `Date` et, en dernier recours, lit la bulle avec la voix de
+  l'appareil.
 - **Robustesse free-tier** : cache LRU des résultats Gemini, **garde de débit** (~17 req/min) et
   **cooldown de 45 s après un HTTP 429**. En cas d'échec/quota/clé absente, le service **se rabat
   automatiquement** sur l'OCR+traduction ML Kit hors-ligne et le TTS de l'appareil. Les erreurs

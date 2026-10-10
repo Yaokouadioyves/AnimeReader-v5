@@ -66,6 +66,7 @@ import com.animereader.tts.DeviceTts
 import com.animereader.tts.EdgeVoice
 import com.animereader.tts.SpeechItem
 import com.animereader.tts.SpeechQueue
+import com.animereader.tts.SpeechText
 import com.animereader.tts.VoiceProvider
 import com.animereader.ui.theme.resolvePalette
 import androidx.compose.ui.graphics.toArgb
@@ -198,6 +199,11 @@ class OverlayService : LifecycleService() {
             onItemStart = { item ->
                 lastSpeechId = item.id
                 ui.post { showCaption(item.original, item.translated) }
+            },
+            // Synthesize the next bubbles while the current one plays → no gap between them.
+            prefetch = { item ->
+                if (settings.voiceMethod == VoiceMethod.ONLINE)
+                    edgeVoice.prefetch(item.text, item.langTag, item.rate, item.timbre)
             },
         )
         lifecycleScope.launch {
@@ -843,8 +849,9 @@ class OverlayService : LifecycleService() {
         for (line in lines) {
             if (line.original.isBlank()) continue
             spoken.add(line)
-            if (s.ttsEnabled) {
-                val toSpeak = line.translated ?: line.original
+            // Spoken copy cleaned for the voice (stretched letters, "?!?!", ♪…); captions keep the text.
+            val toSpeak = SpeechText.prepare(line.translated ?: line.original)
+            if (s.ttsEnabled && toSpeak.isNotBlank()) {
                 speech.enqueue(
                     SpeechItem(
                         id = toSpeak.hashCode().toString(),

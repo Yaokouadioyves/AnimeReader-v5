@@ -21,7 +21,7 @@ data class Settings(
     val provider: TextProvider = TextProvider.OPENAI,
     // Voice & reading
     val ttsEnabled: Boolean = true,
-    val voiceMethod: VoiceMethod = VoiceMethod.OFFLINE,
+    val voiceMethod: VoiceMethod = VoiceMethod.ONLINE, // free neural voice; falls back to device TTS
     val voiceProvider: VoiceProviderId = VoiceProviderId.ELEVENLABS,
     val speed: Float = 1f,
     val timbre: String = "Féminine",
@@ -118,7 +118,7 @@ class SettingsRepository(private val context: Context) {
                 method = p[Keys.method]?.let { enumOrNull<TranslationMethod>(it) } ?: TranslationMethod.ONLINE,
                 provider = p[Keys.provider]?.let { enumOrNull<TextProvider>(it) } ?: TextProvider.OPENAI,
                 ttsEnabled = p[Keys.ttsEnabled] ?: true,
-                voiceMethod = p[Keys.voiceMethod]?.let { enumOrNull<VoiceMethod>(it) } ?: VoiceMethod.OFFLINE,
+                voiceMethod = p[Keys.voiceMethod]?.let { enumOrNull<VoiceMethod>(it) } ?: VoiceMethod.ONLINE,
                 voiceProvider = p[Keys.voiceProvider]?.let { enumOrNull<VoiceProviderId>(it) } ?: VoiceProviderId.ELEVENLABS,
                 speed = p[Keys.speed] ?: 1f,
                 timbre = p[Keys.timbre] ?: "Féminine",
