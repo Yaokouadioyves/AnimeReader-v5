@@ -111,4 +111,19 @@ class ScrollTrackerTest {
         assertEquals(true, ScrollTracker.endsSentence("Quoi ?! »"))
         assertEquals(false, ScrollTracker.endsSentence("Je ne sais pas si"))
     }
+
+    @Test fun stillPageInOverlayModeReleasesEveryWholeBubbleAtOnce_butNeverTwice() {
+        val t = ScrollTracker()
+        val a = Seen("Tu crois vraiment que je vais te laisser partir ?", Edge.COMPLETE)
+        val b = Seen("Attends, je peux t'expliquer.", Edge.CUT_BOTTOM)    // ends a sentence
+        val c = Seen("Et puis", Edge.CUT_BOTTOM)                           // really cut
+        val d = Seen("la suite de la bulle", Edge.CUT_TOP)
+        val frame = listOf(d, a, b, c)
+        val first = t.onFrame(frame, still = true)            // seen once: nothing settled yet
+        assertEquals(emptyList<String>(), texts(first))
+        val flushed = t.flushStill(frame)
+        assertEquals(listOf(a.text, b.text), texts(flushed))
+        assertEquals(listOf(1, 2), flushed.map { it.index })
+        assertEquals(emptyList<String>(), texts(t.onFrame(frame, still = true) + t.flushStill(frame)))
+    }
 }

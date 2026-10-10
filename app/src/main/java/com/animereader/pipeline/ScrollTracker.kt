@@ -38,6 +38,24 @@ class ScrollTracker(private val memory: Int = 40, private val tallMaxAge: Int = 
     /** Remember [text] as read (e.g. read by a manual replay) so scrolling doesn't repeat it. */
     fun markRead(text: String) = remember(TextDedup.normalize(text))
 
+    /**
+     * Overlay mode: the page has stopped and its translations are about to be drawn over the
+     * bubbles — the OCR then pauses until the page moves, so the second capture that normally
+     * lets a bubble settle never comes. Releases now every bubble of this still capture that
+     * [readableWhenStill] and was not read yet (call it after [onFrame] for the same capture).
+     */
+    fun flushStill(frame: List<Seen>): List<Ready> {
+        val out = ArrayList<Ready>()
+        for ((i, s) in frame.withIndex()) {
+            if (!readableWhenStill(s)) continue
+            val n = TextDedup.normalize(s.text)
+            if (n.length < 2 || alreadyRead(n)) continue
+            out += emit(i, s.text, n)
+        }
+        unsettled = emptyList()
+        return out
+    }
+
     fun onFrame(frame: List<Seen>, still: Boolean): List<Ready> {
         val out = ArrayList<Ready>()
         val norms = frame.map { TextDedup.normalize(it.text) }
@@ -98,6 +116,13 @@ class ScrollTracker(private val memory: Int = 40, private val tallMaxAge: Int = 
     companion object {
         private const val STABLE_SIMILARITY = 0.82
         private const val MIN_OVERLAP_CHARS = 8
+
+        /**
+         * A bubble that can be read (and drawn over) on a still page: whole, or cut at the
+         * bottom by the rectangle but already ending a sentence (only its outline is cut).
+         */
+        fun readableWhenStill(s: Seen): Boolean =
+            s.edge == Edge.COMPLETE || (s.edge == Edge.CUT_BOTTOM && endsSentence(s.text))
 
         fun endsSentence(text: String): Boolean =
             text.trimEnd().trimEnd('"', '»', '\'', ')', '’', '”').trimEnd().lastOrNull()?.let { it in ".!?…" } == true

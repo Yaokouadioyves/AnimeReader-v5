@@ -12,6 +12,7 @@ import android.graphics.Bitmap
 import android.graphics.Color as AColor
 import android.graphics.PixelFormat
 import android.graphics.Rect
+import android.graphics.RectF
 import android.graphics.drawable.GradientDrawable
 import android.media.projection.MediaProjection
 import android.media.projection.MediaProjectionManager
@@ -47,6 +48,7 @@ import com.animereader.internal.FrameDiff
 import com.animereader.internal.GeminiClient
 import com.animereader.internal.MistralClient
 import com.animereader.internal.RateGate
+import com.animereader.internal.TextDedup
 import com.animereader.ocr.Box
 import com.animereader.ocr.Bubble
 import com.animereader.ocr.BubbleClusters
@@ -54,6 +56,8 @@ import com.animereader.ocr.BubbleEdges
 import com.animereader.ocr.Edge
 import com.animereader.ocr.ScanText
 import com.animereader.ocr.ScreenOcr
+import com.animereader.overlay.OverlayLayout
+import com.animereader.overlay.TranslationFrameView
 import com.animereader.pipeline.BubbleReader
 import com.animereader.pipeline.PageBubble
 import com.animereader.pipeline.ReadLine
@@ -122,7 +126,10 @@ class OverlayService : LifecycleService() {
     // Overlay windows
     private var bubble: View? = null
     private var bubbleLp: WindowManager.LayoutParams? = null
-    private var frame: View? = null
+    private var frame: TranslationFrameView? = null
+    private var frameBg: GradientDrawable? = null
+    private var touchWatcher: View? = null
+    private var overlayImg: ImageView? = null
     private var moveHandle: View? = null
     private var sizeHandle: View? = null
     private var controls: View? = null
@@ -148,6 +155,20 @@ class OverlayService : LifecycleService() {
     /** Which bubbles of the scrolling strip are whole, settled and not read yet. */
     private val tracker = ScrollTracker()
     @Volatile private var lastGrid: IntArray? = null
+
+    // Overlay mode: translations drawn over the bubbles of a still page.
+    /** Boxes (region pixels) of the translations on screen; empty = none drawn. */
+    @Volatile private var overlayBoxes: List<Box> = emptyList()
+    /** Bumped whenever the page may have moved: a translation computed before is not drawn. */
+    @Volatile private var overlayGen = 0
+    /** The capture may still show our just-hidden drawing until then → no OCR. */
+    @Volatile private var ocrPausedUntil = 0L
+    /** Our last drawn translations (normalised) and when they were hidden — never read as page text. */
+    @Volatile private var recentOverlay: Pair<Long, List<String>> = 0L to emptyList()
+    /** Set by a touch anywhere on the screen: the loop restarts its "is the page still" watch. */
+    @Volatile private var touchSeen = false
+    /** Original text of the bubble being read aloud (outlined when its translation is drawn). */
+    @Volatile private var speakingOriginal: String? = null
 
     // Geometry (screen pixels)
     private var rx = 0; private var ry = 0; private var rw = 0; private var rh = 0
@@ -201,7 +222,13 @@ class OverlayService : LifecycleService() {
             },
             onItemStart = { item ->
                 lastSpeechId = item.id
-                ui.post { showCaption(item.original, item.translated) }
+                speakingOriginal = item.original
+                ui.post {
+                    // Overlay mode: the translation is already on the bubble → outline it; a bubble
+                    // read while the page scrolls (nothing drawn yet) still gets its subtitle.
+                    if (settings.overlayMode && frame?.hasKey(item.original) == true) frame?.highlight(item.original)
+                    else showCaption(item.original, item.translated)
+                }
             },
             // Synthesize the next bubbles while the current one plays → no gap between them.
             prefetch = { item ->
@@ -212,8 +239,14 @@ class OverlayService : LifecycleService() {
         lifecycleScope.launch {
             repo.settings.collect { newS ->
                 val prevLang = settings.lang
+                val prevOverlay = settings.overlayMode
                 settings = newS
                 ui.post { if (overlaysAdded) updateDock() }
+                if (prevOverlay != newS.overlayMode) {
+                    clearOverlays()
+                    touchSeen = true // re-examine the still page (draws or not, in the new mode)
+                    if (!newS.overlayMode) ui.post { frame?.highlight(null) }
+                }
                 // Changing the target language re-translates the current bubble immediately.
                 if (overlaysAdded && expanded && playing && prevLang != newS.lang) {
                     speech.clear()
@@ -231,6 +264,7 @@ class OverlayService : LifecycleService() {
             if (settings.ttsEnabled && id != null && id == lastSpeechId && speech.currentId == null) {
                 ui.removeCallbacks(hideCaption)
                 captionBar?.visibility = View.GONE
+                frame?.highlight(null)
             }
         }
     }
@@ -332,9 +366,26 @@ class OverlayService : LifecycleService() {
         attachBubbleTouch(b, bp)
         wm.addView(b, bp); bubble = b; bubbleLp = bp
 
-        // Rectangle frame (non-touchable — manga scrolls through it)
-        val f = View(this).apply { background = frameDrawable() }
-        wm.addView(f, overlayParams(rw, rh, touchable = false).apply { x = rx; y = ry }); frame = f
+        // Rectangle frame + the translations drawn over the bubbles (non-touchable — the manga
+        // scrolls through it). Android 12+ only lets a touch through an untrusted overlay window
+        // whose opacity is ≤ 0.8: above that, a scroll starting on the rectangle is swallowed.
+        val bg = frameDrawable().also { frameBg = it }
+        val f = TranslationFrameView(this).apply { background = bg; accent = accentInt() }
+        wm.addView(f, overlayParams(rw, rh, touchable = false).apply { x = rx; y = ry; alpha = MAX_PASS_THROUGH_ALPHA })
+        frame = f
+
+        // Invisible 1-px window told about every touch elsewhere on the screen (ACTION_OUTSIDE):
+        // the drawn translations vanish the moment the user touches the page to scroll.
+        touchWatcher = View(this).also { v ->
+            v.setOnTouchListener { _, e ->
+                if (e.actionMasked == MotionEvent.ACTION_OUTSIDE) onUserTouch()
+                false
+            }
+            wm.addView(v, overlayParams(1, 1, touchable = true).apply {
+                flags = flags or WindowManager.LayoutParams.FLAG_WATCH_OUTSIDE_TOUCH
+                alpha = 0f
+            })
+        }
 
         // Handles (separate touchable windows)
         moveHandle = handleView(R.drawable.ic_target).also {
@@ -410,6 +461,11 @@ class OverlayService : LifecycleService() {
         })
         // re-read the current bubble on demand (bypasses the de-dup)
         dock.addView(dockIcon(R.drawable.ic_replay, textMutedInt()) { replayCurrent() })
+        // Translations on the bubbles ↔ subtitle bar (off = see the original page again)
+        overlayImg = dockIcon(R.drawable.ic_translate, if (settings.overlayMode) accentInt() else textMutedInt()) {
+            lifecycleScope.launch { repo.update { it.copy(overlayMode = !it.overlayMode) } }
+        }
+        dock.addView(overlayImg)
         dock.addView(dockSep())
         // Language pill — tap opens the language dropdown
         val langPill = LinearLayout(this).apply {
@@ -546,7 +602,10 @@ class OverlayService : LifecycleService() {
     /** Re-read whatever is currently in the rectangle, ignoring the de-dup memory. */
     private fun replayCurrent() {
         lifecycleScope.launch(Dispatchers.Default) {
-            val bmp = capturer?.captureRegion(Rect(rx, ry, rx + rw, ry + rh)) ?: return@launch
+            if (overlayBoxes.isNotEmpty()) { clearOverlays(); delay(OVERLAY_HIDE_SETTLE_MS) }
+            val bmp = capturer?.captureRegion(Rect(rx, ry, rx + rw, ry + rh))
+            touchSeen = true // the loop redraws the translations (new language, …) on the still page
+            if (bmp == null) return@launch
             val frame = analyzeFrame(bmp)
             // Everything visible except the tail of a bubble that already went past the top.
             val ready = frame.withIndex()
@@ -590,10 +649,13 @@ class OverlayService : LifecycleService() {
      */
     private suspend fun analyzeFrame(bmp: Bitmap): List<FrameBubble> {
         val pieces = runCatching { ocr.recognize(bmp) }.getOrDefault(emptyList())
+        // Our own translations, if a capture caught them just before they vanished.
+        val echo = recentOverlay.takeIf { System.currentTimeMillis() - it.first < ECHO_MEMORY_MS }?.second.orEmpty()
         val bubbles = BubbleClusters.readingOrder(
             BubbleClusters.clusterLines(pieces.filterNot { ScanText.isWatermark(it.text) })
                 .map { it.copy(text = ScanText.polish(it.text)) }
-                .filterNot { ScanText.isNoise(it.text) },
+                .filterNot { ScanText.isNoise(it.text) }
+                .filterNot { echo.isNotEmpty() && TextDedup.isDuplicate(TextDedup.normalize(it.text), echo, 0.75) },
             rtl = settings.readingRtl,
         )
         var grid: BubbleEdges.Grid? = null // built only when some text comes near an edge
@@ -716,7 +778,7 @@ class OverlayService : LifecycleService() {
         var sx = 0; var sy = 0; var rawX = 0f; var rawY = 0f
         handle.setOnTouchListener { _, e ->
             when (e.action) {
-                MotionEvent.ACTION_DOWN -> { sx = rx; sy = ry; rawX = e.rawX; rawY = e.rawY; interacting = true; wake(); true }
+                MotionEvent.ACTION_DOWN -> { sx = rx; sy = ry; rawX = e.rawX; rawY = e.rawY; interacting = true; clearOverlays(); wake(); true }
                 MotionEvent.ACTION_MOVE -> {
                     rx = sx + (e.rawX - rawX).toInt(); ry = sy + (e.rawY - rawY).toInt()
                     syncRect(); wake(); true
@@ -734,7 +796,7 @@ class OverlayService : LifecycleService() {
         var sw = 0; var sh = 0; var rawX = 0f; var rawY = 0f
         handle.setOnTouchListener { _, e ->
             when (e.action) {
-                MotionEvent.ACTION_DOWN -> { sw = rw; sh = rh; rawX = e.rawX; rawY = e.rawY; interacting = true; wake(); true }
+                MotionEvent.ACTION_DOWN -> { sw = rw; sh = rh; rawX = e.rawX; rawY = e.rawY; interacting = true; clearOverlays(); wake(); true }
                 MotionEvent.ACTION_MOVE -> {
                     rw = (sw + (e.rawX - rawX).toInt()).coerceAtLeast(dp(120))
                     rh = (sh + (e.rawY - rawY).toInt()).coerceAtLeast(dp(70))
@@ -768,9 +830,10 @@ class OverlayService : LifecycleService() {
     private fun safeUpdate(v: View, lp: WindowManager.LayoutParams) { runCatching { wm.updateViewLayout(v, lp) } }
 
     private fun wake() {
-        frame?.alpha = 1f; moveHandle?.alpha = 1f; sizeHandle?.alpha = 1f
+        frameBg?.alpha = 255; moveHandle?.alpha = 1f; sizeHandle?.alpha = 1f
         dimRunnable?.let { ui.removeCallbacks(it) }
-        dimRunnable = Runnable { frame?.alpha = 0.22f; moveHandle?.alpha = 0.3f; sizeHandle?.alpha = 0.3f }
+        // Only the frame dims — translations drawn inside it stay fully visible.
+        dimRunnable = Runnable { frameBg?.alpha = 56; moveHandle?.alpha = 0.3f; sizeHandle?.alpha = 0.3f }
         ui.postDelayed(dimRunnable!!, 2500)
     }
 
@@ -783,14 +846,14 @@ class OverlayService : LifecycleService() {
         frame?.visibility = vis; moveHandle?.visibility = vis; sizeHandle?.visibility = vis; controls?.visibility = vis
         if (value) { playing = true; wake(); startLoop(); updateDock() }
         else {
-            playing = false; stopLoop(); speech.clear(); stopSpeaking()
+            playing = false; stopLoop(); speech.clear(); stopSpeaking(); clearOverlays()
             ui.removeCallbacks(hideCaption); captionBar?.visibility = View.GONE; closeLangPopup()
         }
     }
 
     private fun togglePlay() {
         playing = !playing
-        if (playing) startLoop() else { stopLoop(); speech.clear(); stopSpeaking() }
+        if (playing) startLoop() else { stopLoop(); speech.clear(); stopSpeaking(); clearOverlays() }
         updateDock()
     }
 
@@ -801,6 +864,7 @@ class OverlayService : LifecycleService() {
         methodDot?.background = GradientDrawable().apply { shape = GradientDrawable.OVAL; setColor(methodColorInt()) }
         voiceImg?.setImageResource(if (settings.ttsEnabled) R.drawable.ic_volume else R.drawable.ic_volume_off)
         voiceImg?.setColorFilter(if (settings.ttsEnabled) accentInt() else textMutedInt())
+        overlayImg?.setColorFilter(if (settings.overlayMode) accentInt() else textMutedInt())
         if (langPopupOpen) refreshLangPopup()
     }
 
@@ -811,53 +875,180 @@ class OverlayService : LifecycleService() {
      * text has settled. Reading/translating runs in its own coroutine so the capture keeps
      * following the scroll meanwhile. Once the page has been still for a few captures the OCR is
      * skipped until something moves again (battery).
+     *
+     * Overlay mode: on the first still capture every readable bubble is translated and drawn
+     * over the page. While drawn, the OCR stops (the capture sees our drawing) and the loop only
+     * watches the page AROUND the translations for a scroll; a touch anywhere hides them at once.
      */
     private fun startLoop() {
         if (captureJob?.isActive == true) return
         synchronized(tracker) { tracker.reset() }
         lastGrid = null
         captureJob = lifecycleScope.launch(Dispatchers.Default) {
-            val pages = Channel<List<PageBubble>>(Channel.UNLIMITED)
-            launch { for (page in pages) handlePage(page) }
+            val work = Channel<Work>(Channel.UNLIMITED)
+            launch { for (w in work) handleWork(w) }
             var stillCount = 0
+            var overlayAsked = false // translations requested for the current still page
             try {
                 while (isActive && expanded && playing) {
-                    if (interacting) { delay(150); continue }   // don't read while the frame is moving
+                    if (interacting) { clearOverlays(); delay(150); continue } // the frame is moving
+                    if (touchSeen) {
+                        touchSeen = false
+                        lastGrid = null; stillCount = 0; overlayAsked = false
+                    }
                     val region = Rect(rx, ry, rx + rw, ry + rh)
                     val bmp = capturer?.captureRegion(region)
-                    if (bmp != null) {
-                        val grid = sampleGrid(bmp)
-                        val still = FrameDiff.changedFraction(lastGrid, grid) < 0.006
-                        lastGrid = grid
-                        stillCount = if (still) stillCount + 1 else 0
-                        if (stillCount > STILL_FRAMES_BEFORE_IDLE) {
-                            bmp.recycle()
+                    if (bmp == null) { pause(MOVING_INTERVAL_MS); continue }
+                    val grid = sampleGrid(bmp)
+
+                    val drawn = overlayBoxes
+                    if (drawn.isNotEmpty()) {
+                        val mask = OverlayLayout.gridMask(drawn, bmp.width, bmp.height, GRID)
+                        bmp.recycle()
+                        if (FrameDiff.changedFraction(lastGrid, grid, ignore = mask) >= STILL_DIFF) {
+                            clearOverlays() // scrolled without a touch we saw
+                            lastGrid = null; stillCount = 0; overlayAsked = false
                         } else {
-                            val frame = analyzeFrame(bmp)
-                            val ready = synchronized(tracker) {
-                                tracker.onFrame(frame.map { ScrollTracker.Seen(it.bubble.text, it.edge) }, still)
-                            }
-                            val page = toPage(bmp, frame, ready)
-                            bmp.recycle()
-                            if (page.isNotEmpty()) pages.send(page)
+                            pause(OVERLAY_WATCH_MS)
                         }
+                        continue
                     }
-                    delay(
+                    if (System.currentTimeMillis() < ocrPausedUntil) { bmp.recycle(); delay(40); continue }
+
+                    val still = FrameDiff.changedFraction(lastGrid, grid) < STILL_DIFF
+                    lastGrid = grid
+                    stillCount = if (still) stillCount + 1 else 0
+                    if (!still && overlayAsked) { overlayAsked = false; overlayGen++ }
+                    if (stillCount > STILL_FRAMES_BEFORE_IDLE) {
+                        bmp.recycle()
+                    } else {
+                        val frame = analyzeFrame(bmp)
+                        val seen = frame.map { ScrollTracker.Seen(it.bubble.text, it.edge) }
+                        val drawNow = settings.overlayMode && still && !overlayAsked
+                        val ready = synchronized(tracker) {
+                            val r = tracker.onFrame(seen, still)
+                            // Drawing pauses the OCR: release now what the next capture would have.
+                            if (drawNow) r + tracker.flushStill(seen) else r
+                        }
+                        val job = if (drawNow) { overlayAsked = true; overlayJob(bmp, frame) } else null
+                        val page = toPage(bmp, frame, ready)
+                        bmp.recycle()
+                        if (page.isNotEmpty() || job != null) work.send(Work(page, job))
+                    }
+                    pause(
                         if (stillCount == 0) MOVING_INTERVAL_MS
                         else (settings.captureInterval * 1000).toLong().coerceAtLeast(400)
                     )
                 }
             } finally {
-                pages.close()
+                work.close()
             }
         }
     }
 
+    /** Waits [ms], cut short by a touch on the screen (the page is probably about to move). */
+    private suspend fun pause(ms: Long) {
+        var left = ms
+        while (left > 0 && !touchSeen) { val step = minOf(left, 50L); delay(step); left -= step }
+    }
+
+    /** Bubbles to speak, and/or translations to draw over a still page. */
+    private class Work(val speak: List<PageBubble>, val overlay: OverlayJob?)
+    private class OverlayJob(val gen: Int, val items: List<OverlayItem>)
+    private class OverlayItem(val page: PageBubble, val bubble: Bubble, val paper: Int)
+
+    /** The readable bubbles of a still capture, with their crop and paper colour. */
+    private fun overlayJob(bmp: Bitmap, frame: List<FrameBubble>): OverlayJob? {
+        val eligible = frame.filter { ScrollTracker.readableWhenStill(ScrollTracker.Seen(it.bubble.text, it.edge)) }
+        if (eligible.isEmpty()) return null
+        val w = bmp.width; val h = bmp.height
+        val px = IntArray(w * h)
+        bmp.getPixels(px, 0, w, 0, 0, w, h)
+        val withJpeg = visionEnabled()
+        val items = eligible.map { f ->
+            val pad = OverlayLayout.padFor(f.bubble.lineHeight)
+            val b = f.bubble.box
+            OverlayItem(
+                PageBubble(f.bubble.text, if (withJpeg) cropJpeg(bmp, b) else null),
+                f.bubble,
+                OverlayLayout.paperColor(px, w, h, Box(b.left - pad, b.top - pad, b.right + pad, b.bottom + pad)),
+            )
+        }
+        return OverlayJob(overlayGen, items)
+    }
+
+    private suspend fun handleWork(w: Work) {
+        if (w.speak.isNotEmpty()) handlePage(w.speak)
+        val job = w.overlay ?: return
+        if (job.gen != overlayGen) return
+        val s = settings
+        // Mostly cache hits: the bubbles just spoken were translated by handlePage above.
+        val lines = reader.readPage(job.items.map { it.page }, TargetLang(s.lang, langName(s.lang)))
+        val todo = job.items.zip(lines).filter { (_, l) -> !l.translated.isNullOrBlank() }
+        if (todo.isEmpty() || job.gen != overlayGen) return
+        withContext(Dispatchers.Main) {
+            if (job.gen == overlayGen && expanded && playing && settings.overlayMode) showOverlays(todo)
+        }
+    }
+
+    /** Draws each translation over its bubble (main thread). */
+    private fun showOverlays(items: List<Pair<OverlayItem, ReadLine>>) {
+        val view = frame ?: return
+        val minSize = TypedValue.applyDimension(TypedValue.COMPLEX_UNIT_SP, OVERLAY_MIN_SP, resources.displayMetrics)
+        val shown = items.map { (item, line) ->
+            val text = line.translated!!
+            val ink = OverlayLayout.inkFor(item.paper)
+            val p = OverlayLayout.place(item.bubble.box, item.bubble.lineHeight, rw, rh, minSize) { size, width ->
+                view.textLayout(text, size, width, ink).height
+            }
+            val b = p.box
+            TranslationFrameView.Shown(
+                RectF(b.left.toFloat(), b.top.toFloat(), b.right.toFloat(), b.bottom.toFloat()),
+                view.textLayout(text, p.textSizePx, b.width - 2 * p.inset, ink),
+                item.paper, p.inset.toFloat(), line.original,
+            ) to b
+        }
+        view.setShown(shown.map { it.first })
+        overlayBoxes = shown.map { it.second }
+        recentOverlay = Long.MAX_VALUE to items.map { TextDedup.normalize(it.second.translated!!) }
+        // The bubble being read right now gets its outline instead of the subtitle.
+        val speaking = speakingOriginal?.takeIf { speech.currentId != null }
+        if (speaking != null && view.hasKey(speaking)) {
+            view.highlight(speaking)
+            ui.removeCallbacks(hideCaption); captionBar?.visibility = View.GONE
+        }
+    }
+
+    /** Hides the drawn translations (any thread) and voids the ones still being computed. */
+    private fun clearOverlays() {
+        overlayGen++
+        if (overlayBoxes.isEmpty()) return
+        overlayBoxes = emptyList()
+        val now = System.currentTimeMillis()
+        ocrPausedUntil = now + OVERLAY_HIDE_SETTLE_MS
+        recentOverlay = now to recentOverlay.second
+        ui.post { frame?.clearShown() }
+    }
+
+    /** A touch anywhere (main thread): the user is about to scroll — hide the translations now. */
+    private fun onUserTouch() {
+        if (!overlaysAdded) return
+        overlayGen++
+        if (overlayBoxes.isNotEmpty()) {
+            overlayBoxes = emptyList()
+            val now = System.currentTimeMillis()
+            ocrPausedUntil = now + OVERLAY_HIDE_SETTLE_MS
+            recentOverlay = now to recentOverlay.second
+            frame?.clearShown()
+        }
+        touchSeen = true
+    }
+
     /** 32×32 luminance grid of the captured region, for the frame-diff skip. */
     private fun sampleGrid(bmp: Bitmap): IntArray {
-        val s = Bitmap.createScaledBitmap(bmp, 32, 32, false)
-        val px = IntArray(32 * 32)
-        s.getPixels(px, 0, 32, 0, 0, 32, 32)
+        val s = Bitmap.createScaledBitmap(bmp, GRID, GRID, false)
+        val px = IntArray(GRID * GRID)
+        s.getPixels(px, 0, GRID, 0, 0, GRID, GRID)
         if (s !== bmp) s.recycle()
         return FrameDiff.luminance(px)
     }
@@ -909,7 +1100,8 @@ class OverlayService : LifecycleService() {
             )
         }
         // Translate-only mode has no utterance pacing → show everything at once.
-        if (!s.ttsEnabled && spoken.isNotEmpty()) {
+        // (Overlay mode: the translations get drawn on the bubbles once the page stops.)
+        if (!s.ttsEnabled && !s.overlayMode && spoken.isNotEmpty()) {
             val original = spoken.joinToString("  ") { it.original }
             val translated = spoken.mapNotNull { it.translated }.joinToString("  ").ifBlank { null }
             withContext(Dispatchers.Main) { showCaption(original, translated) }
@@ -1001,7 +1193,7 @@ class OverlayService : LifecycleService() {
         _running.value = false
         stopLoop()
         speech.clear()
-        listOfNotNull(bubble, frame, moveHandle, sizeHandle, controls, captionBar, langPopup, langScrim).forEach { runCatching { wm.removeView(it) } }
+        listOfNotNull(bubble, frame, touchWatcher, moveHandle, sizeHandle, controls, captionBar, langPopup, langScrim).forEach { runCatching { wm.removeView(it) } }
         capturer?.stop()
         runCatching { projection?.stop() }
         ocr.close(); deviceTts.shutdown(); edgeVoice.shutdown()
@@ -1019,6 +1211,19 @@ class OverlayService : LifecycleService() {
         private const val MOVING_INTERVAL_MS = 350L
         /** Still captures still analysed (lets a bubble settle) before the OCR goes idle. */
         private const val STILL_FRAMES_BEFORE_IDLE = 2
+        /** Side of the luminance grid compared between captures, and the "page moved" share. */
+        private const val GRID = 32
+        private const val STILL_DIFF = 0.006
+        /** Translations drawn: how often the page around them is checked for a scroll. */
+        private const val OVERLAY_WATCH_MS = 400L
+        /** After hiding them, captures may still show them for a frame or two. */
+        private const val OVERLAY_HIDE_SETTLE_MS = 250L
+        /** How long OCR text matching a hidden translation is taken for our own drawing. */
+        private const val ECHO_MEMORY_MS = 3000L
+        /** Smallest text size of a drawn translation. */
+        private const val OVERLAY_MIN_SP = 10f
+        /** Highest window opacity Android 12+ still lets touches pass through. */
+        private const val MAX_PASS_THROUGH_ALPHA = 0.8f
 
         private val _running = MutableStateFlow(false)
         val running: StateFlow<Boolean> = _running

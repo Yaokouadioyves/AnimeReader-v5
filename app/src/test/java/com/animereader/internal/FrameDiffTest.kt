@@ -30,4 +30,14 @@ class FrameDiffTest {
         assertEquals(0, lum[0])
         assertEquals(255, lum[1])
     }
+
+    @Test
+    fun `ignored cells (our own drawn translations) do not count as a change`() {
+        val prev = intArrayOf(100, 100, 100, 100)
+        val cur = intArrayOf(250, 100, 100, 100)
+        val ignore = booleanArrayOf(true, false, false, false)
+        assertEquals(0.0, FrameDiff.changedFraction(prev, cur, ignore = ignore), 1e-9)
+        assertEquals(1.0 / 3, FrameDiff.changedFraction(prev, intArrayOf(250, 0, 100, 100), ignore = ignore), 1e-9)
+        assertEquals(0.0, FrameDiff.changedFraction(prev, cur, ignore = BooleanArray(4) { true }), 1e-9)
+    }
 }
