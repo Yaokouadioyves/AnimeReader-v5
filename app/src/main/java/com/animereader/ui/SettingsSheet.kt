@@ -27,8 +27,10 @@ import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import com.animereader.BuildConfig
 import com.animereader.data.Catalog
 import com.animereader.data.Settings
 import com.animereader.data.TextProvider
@@ -55,9 +57,9 @@ fun SettingsSheet(
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
 
     val methodSub = if (settings.method == TranslationMethod.OFFLINE) "ML Kit — sur l'appareil"
-        else "IA cloud — Gemini (clé requise)"
+        else "Google Traduction (sans clé) · Gemini ou Mistral si une clé est saisie"
     val voiceSub = if (settings.voiceMethod == VoiceMethod.OFFLINE) "Moteur TTS de l'appareil"
-        else "edge-tts — voix Microsoft neurale"
+        else "Voix neurales Microsoft, sans clé · repli sur la voix de l'appareil"
 
     ModalBottomSheet(onDismissRequest = onClose, sheetState = sheetState, containerColor = pal.elev) {
         Column(
@@ -80,8 +82,15 @@ fun SettingsSheet(
                     ) { v -> onUpdate { it.copy(method = v) } }
                 }
                 Divider()
-                Stacked("Langue cible", "La traduction suit la langue choisie · « Original » = pas de traduction") {
+                Stacked("Langue cible", "Les bulles déjà dans cette langue sont lues telles quelles, sans traduction") {
                     LangGridMini(settings.lang) { code -> onUpdate { it.copy(lang = code) } }
+                }
+                Divider()
+                Stacked("Sens de lecture", "Ordre dans lequel les bulles d'une page sont lues") {
+                    Segment(
+                        options = listOf("Manga ←" to true, "BD, webtoon →" to false),
+                        selected = settings.readingRtl,
+                    ) { v -> onUpdate { it.copy(readingRtl = v) } }
                 }
             }
 
@@ -112,7 +121,12 @@ fun SettingsSheet(
                         }
                     }
                     Divider()
-                    Stacked("Timbre", null) {
+                    Stacked(
+                        "Timbre",
+                        if (settings.voiceMethod == VoiceMethod.ONLINE)
+                            "Féminine / Masculine : voix récentes, plus naturelles · Neutre : voix classique"
+                        else null,
+                    ) {
                         Segment(options = Catalog.timbres.map { it to it }, selected = settings.timbre, compact = true) { v ->
                             onUpdate { it.copy(timbre = v) }
                         }
@@ -126,7 +140,7 @@ fun SettingsSheet(
                     }
                     Divider()
                 }
-                Stacked("Intervalle de capture", "Fréquence de relecture de la zone") {
+                Stacked("Intervalle de capture", "Page immobile : fréquence de vérification · pendant le défilement, 3 captures par seconde") {
                     Segment(options = Catalog.captureIntervals.map { "${it}s" to it }, selected = settings.captureInterval, compact = true) { v ->
                         onUpdate { it.copy(captureInterval = v) }
                     }
@@ -144,7 +158,7 @@ fun SettingsSheet(
                 }
             }
 
-            GroupLabel("IA en ligne (Gemini)")
+            GroupLabel("IA en ligne")
             Card {
                 Column(Modifier.fillMaxWidth().padding(vertical = 12.dp)) {
                     OutlinedTextField(
@@ -161,6 +175,39 @@ fun SettingsSheet(
                         modifier = Modifier.padding(top = 8.dp),
                     )
                 }
+                Divider()
+                Column(Modifier.fillMaxWidth().padding(vertical = 12.dp)) {
+                    OutlinedTextField(
+                        value = settings.mistralKey,
+                        onValueChange = { v -> onUpdate { it.copy(mistralKey = v.trim()) } },
+                        label = { Text("Clé API Mistral (secours, optionnelle)") },
+                        singleLine = true,
+                        visualTransformation = PasswordVisualTransformation(),
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                    Text(
+                        "Gratuite sur console.mistral.ai (tier Experiment) · prend le relais automatiquement quand le quota Gemini est atteint.",
+                        color = pal.textMuted, fontSize = fs(11.5f),
+                        modifier = Modifier.padding(top = 8.dp),
+                    )
+                }
+            }
+
+            GroupLabel("Application")
+            Card {
+                val uri = LocalUriHandler.current
+                Row(
+                    Modifier.fillMaxWidth().clickable { uri.openUri(RELEASES_URL) }.padding(vertical = 14.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Column(Modifier.weight(1f)) {
+                        LabelText(
+                            "Mises à jour",
+                            "Version ${BuildConfig.VERSION_NAME} · ouvre la page des versions sur GitHub",
+                        )
+                    }
+                    Text("Ouvrir", color = pal.accent, fontSize = fs(13f), fontWeight = FontWeight.Bold)
+                }
             }
 
             if (running) {
@@ -170,6 +217,9 @@ fun SettingsSheet(
         }
     }
 }
+
+/** Every merge into main is published there by the CI (signed with the same key → installs over). */
+private const val RELEASES_URL = "https://github.com/Yaokouadioyves/AnimeReader-v5/releases/latest"
 
 @Composable
 private fun GroupLabel(text: String) {
@@ -273,19 +323,25 @@ private fun <T> ProviderRow(
 @Composable
 private fun LangGridMini(selected: String, onSelect: (String) -> Unit) {
     val pal = LocalPalette.current; val style = LocalDirStyle.current
-    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-        Catalog.languages.forEach { l ->
-            val on = l.code == selected
-            Box(
-                Modifier.weight(1f)
-                    .clip(RoundedCornerShape(style.radiusSm))
-                    .background(if (on) pal.accentSoft else pal.surface2)
-                    .border(1.5.dp, if (on) pal.accentBorder else pal.border, RoundedCornerShape(style.radiusSm))
-                    .clickable { onSelect(l.code) }
-                    .padding(vertical = 10.dp),
-                contentAlignment = Alignment.Center,
-            ) {
-                Text(l.tag, color = if (on) pal.accent else pal.text, fontSize = fs(13f), fontWeight = FontWeight.Bold)
+    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+        Catalog.languages.chunked(4).forEach { rowLangs ->
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                rowLangs.forEach { l ->
+                    val on = l.code == selected
+                    Box(
+                        Modifier.weight(1f)
+                            .clip(RoundedCornerShape(style.radiusSm))
+                            .background(if (on) pal.accentSoft else pal.surface2)
+                            .border(1.5.dp, if (on) pal.accentBorder else pal.border, RoundedCornerShape(style.radiusSm))
+                            .clickable { onSelect(l.code) }
+                            .padding(vertical = 10.dp),
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        Text(l.tag, color = if (on) pal.accent else pal.text, fontSize = fs(13f), fontWeight = FontWeight.Bold)
+                    }
+                }
+                // Pad the last row so its cells keep the same width as full rows.
+                repeat(4 - rowLangs.size) { Spacer(Modifier.weight(1f)) }
             }
         }
     }

@@ -8,6 +8,7 @@ import android.app.PendingIntent
 import android.content.Context
 import android.content.Intent
 import android.content.pm.ServiceInfo
+import android.graphics.Bitmap
 import android.graphics.Color as AColor
 import android.graphics.PixelFormat
 import android.graphics.Rect
@@ -36,28 +37,54 @@ import com.animereader.R
 import com.animereader.capture.ScreenCapturer
 import com.animereader.data.Catalog
 import com.animereader.data.HistoryEntry
+import com.animereader.data.HistoryStore
 import com.animereader.data.Settings
 import com.animereader.data.SettingsRepository
 import com.animereader.data.TranslationMethod
 import com.animereader.data.VoiceMethod
 import com.animereader.internal.ApiKeys
+import com.animereader.internal.FrameDiff
 import com.animereader.internal.GeminiClient
+import com.animereader.internal.MistralClient
+import com.animereader.internal.RateGate
+import com.animereader.ocr.Box
+import com.animereader.ocr.Bubble
+import com.animereader.ocr.BubbleClusters
+import com.animereader.ocr.BubbleEdges
+import com.animereader.ocr.Edge
+import com.animereader.ocr.ScanText
 import com.animereader.ocr.ScreenOcr
+import com.animereader.pipeline.BubbleReader
+import com.animereader.pipeline.PageBubble
+import com.animereader.pipeline.ReadLine
+import com.animereader.pipeline.ScrollTracker
+import com.animereader.pipeline.TargetLang
+import com.animereader.pipeline.TextTranslation
+import com.animereader.pipeline.VisionBatchCall
+import com.animereader.pipeline.VisionOcrCall
+import com.animereader.translate.GoogleWebTranslator
 import com.animereader.translate.Translators
 import com.animereader.tts.DeviceTts
 import com.animereader.tts.EdgeVoice
+import com.animereader.tts.SpeechItem
+import com.animereader.tts.SpeechQueue
+import com.animereader.tts.SpeechText
 import com.animereader.tts.VoiceProvider
-import com.animereader.tts.Voices
 import com.animereader.ui.theme.resolvePalette
 import androidx.compose.ui.graphics.toArgb
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import java.io.ByteArrayOutputStream
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -69,6 +96,9 @@ import java.util.Locale
  *  - Long-press bubble → opens the app.
  *  - Stop   → from the notification or the app.
  * The rectangle auto-dims after a few seconds without interaction.
+ *
+ * The OCR→translation decisions (cache, rate gates, Gemini→Mistral fallback) live in
+ * [BubbleReader]; utterance sequencing lives in [SpeechQueue] — both JVM-unit-tested.
  */
 class OverlayService : LifecycleService() {
 
@@ -80,7 +110,10 @@ class OverlayService : LifecycleService() {
     private lateinit var ocr: ScreenOcr
     private lateinit var deviceTts: DeviceTts
     private lateinit var edgeVoice: EdgeVoice
+    private lateinit var reader: BubbleReader
+    private lateinit var speech: SpeechQueue
     private val apiKeys = ApiKeys()
+    private val googleWeb = GoogleWebTranslator()
 
     private var projection: MediaProjection? = null
     private var capturer: ScreenCapturer? = null
@@ -88,6 +121,7 @@ class OverlayService : LifecycleService() {
 
     // Overlay windows
     private var bubble: View? = null
+    private var bubbleLp: WindowManager.LayoutParams? = null
     private var frame: View? = null
     private var moveHandle: View? = null
     private var sizeHandle: View? = null
@@ -108,17 +142,12 @@ class OverlayService : LifecycleService() {
     private var expanded = false
     private var playing = false
     @Volatile private var interacting = false
-    @Volatile private var currentSpeechId: String? = null
-    private var lastOcrErr = 0L
-    private var lastGeminiCall = 0L
-    private var geminiCooldownUntil = 0L
-    private val minGeminiGap = 3500L     // ~17 req/min ceiling (free-tier friendly)
-    private val geminiCooldown = 45000L  // back off this long after a 429
-    private val geminiCache = object : LinkedHashMap<String, Pair<String, String>>(64, 0.75f, true) {
-        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, Pair<String, String>>?) = size > 60
-    }
-    private val recentSpoken = ArrayDeque<String>()
-    private val stableFrames = 2
+    @Volatile private var lastSpeechId: String? = null
+    // Written from the capture loop and replay coroutines → keep visibility across threads.
+    @Volatile private var lastOcrErr = 0L
+    /** Which bubbles of the scrolling strip are whole, settled and not read yet. */
+    private val tracker = ScrollTracker()
+    @Volatile private var lastGrid: IntArray? = null
 
     // Geometry (screen pixels)
     private var rx = 0; private var ry = 0; private var rw = 0; private var rh = 0
@@ -133,12 +162,53 @@ class OverlayService : LifecycleService() {
         repo = SettingsRepository(this)
         ocr = ScreenOcr()
         deviceTts = DeviceTts(this)
-        deviceTts.onSpeechDone = { id -> ui.post { onSpeechFinished(id) } }
+        deviceTts.onSpeechDone = { id -> onUtteranceDone(id) }
         edgeVoice = EdgeVoice(this, deviceTts)
-        edgeVoice.onSpeechDone = { id -> ui.post { onSpeechFinished(id) } }
+        edgeVoice.onSpeechDone = { id -> onUtteranceDone(id) }
         edgeVoice.onError = { msg ->
             ui.post { android.widget.Toast.makeText(this, "Voix en ligne ⚠️ $msg", android.widget.Toast.LENGTH_LONG).show() }
         }
+        reader = BubbleReader(
+            backends = listOf(
+                BubbleReader.Backend(
+                    name = "Gemini",
+                    available = { settings.method == TranslationMethod.ONLINE && settings.geminiKey.isNotBlank() },
+                    single = VisionOcrCall { jpeg, lang, ctx -> GeminiClient.ocrTranslate(settings.geminiKey, jpeg, lang, ctx) },
+                    batch = VisionBatchCall { jpegs, lang, ctx -> GeminiClient.ocrTranslateBatch(settings.geminiKey, jpegs, lang, ctx) },
+                    gate = RateGate(minGapMs = 3500L, cooldownMs = 45000L), // ~17 req/min ceiling, 45s after a 429
+                ),
+                BubbleReader.Backend(
+                    name = "Mistral",
+                    available = { settings.method == TranslationMethod.ONLINE && settings.mistralKey.isNotBlank() },
+                    single = VisionOcrCall { jpeg, lang, ctx -> MistralClient.ocrTranslate(settings.mistralKey, jpeg, lang, ctx) },
+                    batch = VisionBatchCall { jpegs, lang, ctx -> MistralClient.ocrTranslateBatch(settings.mistralKey, jpegs, lang, ctx) },
+                    gate = RateGate(minGapMs = 1500L, cooldownMs = 45000L),
+                ),
+            ),
+            // Text chain for what the vision backends didn't translate: keyless Google web
+            // translate for the whole page in one request (cloud NMT — the quality the
+            // screen-translate apps are known for, plus the detected language of each bubble),
+            // then on-device ML Kit for whatever Google couldn't do.
+            textTranslate = { texts, code -> translateTexts(texts, code) },
+            onNotice = { msg -> toastThrottled(msg) },
+        )
+        speech = SpeechQueue(
+            scope = lifecycleScope,
+            speak = { item ->
+                val provider: VoiceProvider =
+                    if (settings.voiceMethod == VoiceMethod.ONLINE) edgeVoice else deviceTts
+                provider.speak(item.text, item.langTag, item.rate, item.timbre)
+            },
+            onItemStart = { item ->
+                lastSpeechId = item.id
+                ui.post { showCaption(item.original, item.translated) }
+            },
+            // Synthesize the next bubbles while the current one plays → no gap between them.
+            prefetch = { item ->
+                if (settings.voiceMethod == VoiceMethod.ONLINE)
+                    edgeVoice.prefetch(item.text, item.langTag, item.rate, item.timbre)
+            },
+        )
         lifecycleScope.launch {
             repo.settings.collect { newS ->
                 val prevLang = settings.lang
@@ -146,17 +216,22 @@ class OverlayService : LifecycleService() {
                 ui.post { if (overlaysAdded) updateDock() }
                 // Changing the target language re-translates the current bubble immediately.
                 if (overlaysAdded && expanded && playing && prevLang != newS.lang) {
+                    speech.clear()
+                    stopSpeaking()
                     replayCurrent()
                 }
             }
         }
     }
 
-    /** When voice reading is on, hide the subtitle the moment the matching utterance finishes. */
-    private fun onSpeechFinished(id: String?) {
-        if (settings.ttsEnabled && id != null && id == currentSpeechId) {
-            ui.removeCallbacks(hideCaption)
-            captionBar?.visibility = View.GONE
+    /** Providers report completion here; the queue advances, and the caption hides when idle. */
+    private fun onUtteranceDone(id: String?) {
+        speech.signalDone(id)
+        ui.post {
+            if (settings.ttsEnabled && id != null && id == lastSpeechId && speech.currentId == null) {
+                ui.removeCallbacks(hideCaption)
+                captionBar?.visibility = View.GONE
+            }
         }
     }
 
@@ -169,8 +244,15 @@ class OverlayService : LifecycleService() {
                 val rc = intent.getIntExtra(EXTRA_RESULT_CODE, Activity.RESULT_CANCELED)
                 val data = IntentCompat.getParcelableExtra(intent, EXTRA_DATA, Intent::class.java)
                 if (projection == null && rc == Activity.RESULT_OK && data != null) setupProjection(rc, data)
-                if (!overlaysAdded) addOverlays()
-                _running.value = true
+                // Wait for the persisted settings (saved rectangle/bubble geometry) before
+                // building the overlays, so they reappear where the user left them.
+                lifecycleScope.launch {
+                    settings = repo.settings.first()
+                    withContext(Dispatchers.Main) {
+                        if (!overlaysAdded) addOverlays()
+                        _running.value = true
+                    }
+                }
             }
         }
         return START_STICKY
@@ -227,8 +309,12 @@ class OverlayService : LifecycleService() {
 
     private fun addOverlays() {
         val (w, h, _) = displaySize()
-        rw = (w * 0.78f).toInt(); rh = dp(120)
-        rx = (w - rw) / 2; ry = (h * 0.34f).toInt()
+        val s = settings
+        // Restore the saved rectangle/bubble placement; fall back to the design defaults.
+        rw = if (s.rectW > 0) s.rectW.coerceIn(dp(120), w) else (w * 0.78f).toInt()
+        rh = if (s.rectH > 0) s.rectH.coerceIn(dp(70), h) else dp(120)
+        rx = if (s.rectX >= 0) s.rectX.coerceIn(0, (w - rw).coerceAtLeast(0)) else (w - rw) / 2
+        ry = if (s.rectY >= 0) s.rectY.coerceIn(0, (h - rh).coerceAtLeast(0)) else (h * 0.34f).toInt()
 
         // Bubble
         val b = FrameLayout(this).apply {
@@ -239,9 +325,12 @@ class OverlayService : LifecycleService() {
             })
             elevation = dp(8).toFloat()
         }
-        val bp = overlayParams(dp(56), dp(56), touchable = true).apply { x = w - dp(72); y = (h * 0.55f).toInt() }
+        val bp = overlayParams(dp(56), dp(56), touchable = true).apply {
+            x = if (s.bubbleX >= 0) s.bubbleX.coerceIn(0, (w - dp(56)).coerceAtLeast(0)) else w - dp(72)
+            y = if (s.bubbleY >= 0) s.bubbleY.coerceIn(0, (h - dp(56)).coerceAtLeast(0)) else (h * 0.55f).toInt()
+        }
         attachBubbleTouch(b, bp)
-        wm.addView(b, bp); bubble = b
+        wm.addView(b, bp); bubble = b; bubbleLp = bp
 
         // Rectangle frame (non-touchable — manga scrolls through it)
         val f = View(this).apply { background = frameDrawable() }
@@ -391,7 +480,7 @@ class OverlayService : LifecycleService() {
                 setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f); typeface = android.graphics.Typeface.DEFAULT_BOLD
             })
             row.addView(TextView(this).apply {
-                text = if (l.code == "fr") "Original" else l.label
+                text = l.label
                 setTextSize(TypedValue.COMPLEX_UNIT_SP, 13.5f)
             })
             card.addView(row)
@@ -445,6 +534,7 @@ class OverlayService : LifecycleService() {
 
     private fun toggleVoice() {
         lifecycleScope.launch { repo.update { it.copy(ttsEnabled = !it.ttsEnabled) } }
+        speech.clear()
         stopSpeaking()
     }
 
@@ -457,15 +547,105 @@ class OverlayService : LifecycleService() {
     private fun replayCurrent() {
         lifecycleScope.launch(Dispatchers.Default) {
             val bmp = capturer?.captureRegion(Rect(rx, ry, rx + rw, ry + rh)) ?: return@launch
-            val raw = runCatching { ocr.recognize(bmp) }.getOrDefault(""); bmp.recycle()
-            if (raw.isNotBlank()) {
-                val norm = normalizeText(raw)
-                synchronized(recentSpoken) {
-                    if (norm !in recentSpoken) { recentSpoken.addLast(norm); while (recentSpoken.size > 8) recentSpoken.removeFirst() }
-                }
-                handleRecognized(raw)
-            }
+            val frame = analyzeFrame(bmp)
+            // Everything visible except the tail of a bubble that already went past the top.
+            val ready = frame.withIndex()
+                .filter { it.value.edge != Edge.CUT_TOP }
+                .map { ScrollTracker.Ready(it.index, it.value.bubble.text) }
+            val page = toPage(bmp, frame, ready)
+            bmp.recycle()
+            if (page.isEmpty()) return@launch
+            synchronized(tracker) { ready.forEach { tracker.markRead(it.text) } }
+            handlePage(page)
         }
+    }
+
+    private fun visionEnabled(): Boolean =
+        settings.method == TranslationMethod.ONLINE &&
+            (settings.geminiKey.isNotBlank() || settings.mistralKey.isNotBlank())
+
+    private suspend fun translateTexts(texts: List<String>, code: String): List<TextTranslation?> {
+        val viaGoogle =
+            if (settings.method == TranslationMethod.ONLINE)
+                runCatching { withContext(Dispatchers.IO) { googleWeb.translateBatch(texts, code) } }.getOrNull()
+            else null
+        return texts.mapIndexed { i, text ->
+            viaGoogle?.getOrNull(i)?.let { return@mapIndexed TextTranslation(it.text, "Google", it.detected) }
+            runCatching {
+                TextTranslation(
+                    Translators.create(TranslationMethod.OFFLINE, settings.provider, apiKeys).translate(text, code),
+                    "ML Kit", null,
+                )
+            }.getOrNull()
+        }
+    }
+
+    /** One bubble of a capture and whether an edge of the rectangle cuts it. */
+    private class FrameBubble(val bubble: Bubble, val edge: Edge)
+
+    /**
+     * OCR the frame, group the text lines into bubbles, drop scan-group watermarks and stray
+     * marks, order the bubbles for reading and tell, for each one, whether it is whole or cut
+     * by the top/bottom of the rectangle (see [BubbleEdges]).
+     */
+    private suspend fun analyzeFrame(bmp: Bitmap): List<FrameBubble> {
+        val pieces = runCatching { ocr.recognize(bmp) }.getOrDefault(emptyList())
+        val bubbles = BubbleClusters.readingOrder(
+            BubbleClusters.clusterLines(pieces.filterNot { ScanText.isWatermark(it.text) })
+                .map { it.copy(text = ScanText.polish(it.text)) }
+                .filterNot { ScanText.isNoise(it.text) },
+            rtl = settings.readingRtl,
+        )
+        var grid: BubbleEdges.Grid? = null // built only when some text comes near an edge
+        return bubbles.map { b ->
+            val near = BubbleEdges.nearTop(b.box, b.lineHeight) ||
+                BubbleEdges.nearBottom(b.box, b.lineHeight, bmp.height)
+            val outline = if (near) {
+                val g = grid ?: edgeGrid(bmp).also { grid = it }
+                BubbleEdges.probe(g, b.box)
+            } else null
+            FrameBubble(b, BubbleEdges.classify(b.box, b.lineHeight, bmp.height, outline))
+        }
+    }
+
+    /** Darkest-pixel grid of the capture (~400 cells on the long side) for the outline probe. */
+    private fun edgeGrid(bmp: Bitmap): BubbleEdges.Grid {
+        val w = bmp.width; val h = bmp.height
+        val px = IntArray(w * h)
+        bmp.getPixels(px, 0, w, 0, 0, w, h)
+        return BubbleEdges.minPool(px, w, h, (maxOf(w, h) / 400).coerceAtLeast(1))
+    }
+
+    /** The bubbles to read now, with their crop for the vision backends (if enabled). */
+    private fun toPage(bmp: Bitmap, frame: List<FrameBubble>, ready: List<ScrollTracker.Ready>): List<PageBubble> {
+        val withJpeg = visionEnabled()
+        return ready.map { r ->
+            val crop = r.index?.takeIf { withJpeg }?.let { cropJpeg(bmp, frame[it].bubble.box) }
+            PageBubble(r.text, crop)
+        }
+    }
+
+    /** Crop a bubble (with padding), downscale big crops, and JPEG-encode for upload. */
+    private fun cropJpeg(bmp: Bitmap, box: Box): ByteArray {
+        val pad = dp(8)
+        val l = (box.left - pad).coerceIn(0, bmp.width - 1)
+        val t = (box.top - pad).coerceIn(0, bmp.height - 1)
+        val r = (box.right + pad).coerceIn(l + 1, bmp.width)
+        val btm = (box.bottom + pad).coerceIn(t + 1, bmp.height)
+        var crop = Bitmap.createBitmap(bmp, l, t, r - l, btm - t)
+        val maxDim = 1024
+        val longest = maxOf(crop.width, crop.height)
+        if (longest > maxDim) {
+            val sc = maxDim.toFloat() / longest
+            val scaled = Bitmap.createScaledBitmap(
+                crop, (crop.width * sc).toInt().coerceAtLeast(1), (crop.height * sc).toInt().coerceAtLeast(1), true,
+            )
+            if (scaled !== crop) { crop.recycle(); crop = scaled }
+        }
+        val out = ByteArrayOutputStream()
+        crop.compress(Bitmap.CompressFormat.JPEG, 88, out)
+        if (crop !== bmp) crop.recycle()
+        return out.toByteArray()
     }
 
     /** Subtitle bar: dark high-contrast scrim, white translation (translation-only),
@@ -524,6 +704,7 @@ class OverlayService : LifecycleService() {
                 MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
                     ui.removeCallbacks(longPress)
                     if (!moved && !longFired) toggleExpanded()
+                    if (moved) saveBubblePos(lp.x, lp.y)
                     true
                 }
                 else -> false
@@ -540,7 +721,10 @@ class OverlayService : LifecycleService() {
                     rx = sx + (e.rawX - rawX).toInt(); ry = sy + (e.rawY - rawY).toInt()
                     syncRect(); wake(); true
                 }
-                MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> { ui.postDelayed({ interacting = false }, 350); true }
+                MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
+                    ui.postDelayed({ interacting = false }, 350)
+                    saveRectGeometry(); true
+                }
                 else -> true
             }
         }
@@ -556,10 +740,23 @@ class OverlayService : LifecycleService() {
                     rh = (sh + (e.rawY - rawY).toInt()).coerceAtLeast(dp(70))
                     syncRect(); wake(); true
                 }
-                MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> { ui.postDelayed({ interacting = false }, 350); true }
+                MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
+                    ui.postDelayed({ interacting = false }, 350)
+                    saveRectGeometry(); true
+                }
                 else -> true
             }
         }
+    }
+
+    /** Persist the rectangle so the next session reopens it exactly where the user left it. */
+    private fun saveRectGeometry() {
+        val x = rx; val y = ry; val w = rw; val h = rh
+        lifecycleScope.launch { repo.update { it.copy(rectX = x, rectY = y, rectW = w, rectH = h) } }
+    }
+
+    private fun saveBubblePos(x: Int, y: Int) {
+        lifecycleScope.launch { repo.update { it.copy(bubbleX = x, bubbleY = y) } }
     }
 
     private fun syncRect() {
@@ -585,12 +782,15 @@ class OverlayService : LifecycleService() {
         val vis = if (value) View.VISIBLE else View.GONE
         frame?.visibility = vis; moveHandle?.visibility = vis; sizeHandle?.visibility = vis; controls?.visibility = vis
         if (value) { playing = true; wake(); startLoop(); updateDock() }
-        else { playing = false; stopLoop(); stopSpeaking(); ui.removeCallbacks(hideCaption); captionBar?.visibility = View.GONE; closeLangPopup() }
+        else {
+            playing = false; stopLoop(); speech.clear(); stopSpeaking()
+            ui.removeCallbacks(hideCaption); captionBar?.visibility = View.GONE; closeLangPopup()
+        }
     }
 
     private fun togglePlay() {
         playing = !playing
-        if (playing) startLoop() else { stopLoop(); stopSpeaking() }
+        if (playing) startLoop() else { stopLoop(); speech.clear(); stopSpeaking() }
         updateDock()
     }
 
@@ -604,148 +804,128 @@ class OverlayService : LifecycleService() {
         if (langPopupOpen) refreshLangPopup()
     }
 
-    // ── Capture → OCR → translate → speak ──
+    // ── Capture → bubbles → OCR → translate → speak ──
+    /**
+     * Vertical-scroll reading: capture often while the strip moves (every [MOVING_INTERVAL_MS]),
+     * hand each capture to the [tracker], which releases a bubble as soon as it is whole and its
+     * text has settled. Reading/translating runs in its own coroutine so the capture keeps
+     * following the scroll meanwhile. Once the page has been still for a few captures the OCR is
+     * skipped until something moves again (battery).
+     */
     private fun startLoop() {
         if (captureJob?.isActive == true) return
-        recentSpoken.clear()
+        synchronized(tracker) { tracker.reset() }
+        lastGrid = null
         captureJob = lifecycleScope.launch(Dispatchers.Default) {
-            var pending = ""
-            var stable = 0
-            while (isActive && expanded && playing) {
-                if (interacting) { delay(150); continue }   // don't read while the frame is moving
-                val region = Rect(rx, ry, rx + rw, ry + rh)
-                val bmp = capturer?.captureRegion(region)
-                if (bmp != null) {
-                    val raw = runCatching { ocr.recognize(bmp) }.getOrDefault("")
-                    bmp.recycle()
-                    val norm = normalizeText(raw)
-                    if (norm.length >= 2) {
-                        if (norm == pending) stable++ else { pending = norm; stable = 1 }
-                        // Read only once the OCR has settled (same text across captures) and the
-                        // line isn't a repeat/continuation of something we just read.
-                        if (stable == stableFrames && !isRecentDuplicate(norm)) {
-                            synchronized(recentSpoken) { recentSpoken.addLast(norm); while (recentSpoken.size > 8) recentSpoken.removeFirst() }
-                            handleRecognized(raw)
+            val pages = Channel<List<PageBubble>>(Channel.UNLIMITED)
+            launch { for (page in pages) handlePage(page) }
+            var stillCount = 0
+            try {
+                while (isActive && expanded && playing) {
+                    if (interacting) { delay(150); continue }   // don't read while the frame is moving
+                    val region = Rect(rx, ry, rx + rw, ry + rh)
+                    val bmp = capturer?.captureRegion(region)
+                    if (bmp != null) {
+                        val grid = sampleGrid(bmp)
+                        val still = FrameDiff.changedFraction(lastGrid, grid) < 0.006
+                        lastGrid = grid
+                        stillCount = if (still) stillCount + 1 else 0
+                        if (stillCount > STILL_FRAMES_BEFORE_IDLE) {
+                            bmp.recycle()
+                        } else {
+                            val frame = analyzeFrame(bmp)
+                            val ready = synchronized(tracker) {
+                                tracker.onFrame(frame.map { ScrollTracker.Seen(it.bubble.text, it.edge) }, still)
+                            }
+                            val page = toPage(bmp, frame, ready)
+                            bmp.recycle()
+                            if (page.isNotEmpty()) pages.send(page)
                         }
                     }
+                    delay(
+                        if (stillCount == 0) MOVING_INTERVAL_MS
+                        else (settings.captureInterval * 1000).toLong().coerceAtLeast(400)
+                    )
                 }
-                delay((settings.captureInterval * 1000).toLong().coerceAtLeast(400))
+            } finally {
+                pages.close()
             }
         }
     }
 
-    /** Lowercase, strip whitespace/punctuation (keeps CJK) so dedup ignores cosmetic OCR diffs. */
-    private fun normalizeText(s: String): String =
-        s.lowercase().replace(Regex("[\\s\\p{Punct}　・…]+"), "")
-
-    private fun isRecentDuplicate(norm: String): Boolean {
-        val snapshot = synchronized(recentSpoken) { recentSpoken.toList() }
-        for (prev in snapshot) {
-            if (norm == prev) return true
-            val shorter = if (norm.length <= prev.length) norm else prev
-            val longer = if (norm.length <= prev.length) prev else norm
-            if (longer.contains(shorter) && shorter.length >= longer.length * 0.6) return true
-            if (bigramSimilarity(norm, prev) >= 0.82) return true
-        }
-        return false
-    }
-
-    private fun bigramSimilarity(a: String, b: String): Double {
-        if (a.length < 2 || b.length < 2) return if (a == b) 1.0 else 0.0
-        fun bigrams(s: String) = (0 until s.length - 1).mapTo(HashSet()) { s.substring(it, it + 2) }
-        val sa = bigrams(a); val sb = bigrams(b)
-        val inter = sa.count { it in sb }
-        val union = sa.size + sb.size - inter
-        return if (union == 0) 0.0 else inter.toDouble() / union
+    /** 32×32 luminance grid of the captured region, for the frame-diff skip. */
+    private fun sampleGrid(bmp: Bitmap): IntArray {
+        val s = Bitmap.createScaledBitmap(bmp, 32, 32, false)
+        val px = IntArray(32 * 32)
+        s.getPixels(px, 0, 32, 0, 0, 32, 32)
+        if (s !== bmp) s.recycle()
+        return FrameDiff.luminance(px)
     }
 
     private fun stopLoop() { captureJob?.cancel(); captureJob = null }
 
-    private suspend fun handleRecognized(mlkitText: String) {
+    /**
+     * Read every bubble of the page: ONE online request for all of them (see
+     * [BubbleReader.readPage]), then queue the utterances in manga order — the
+     * speech queue reads them one after the other without cutting.
+     */
+    private suspend fun handlePage(page: List<PageBubble>) {
+        if (page.isEmpty()) return
         val s = settings
-        var original = mlkitText
-        var translated: String? = null
-        val useGemini = s.method == TranslationMethod.ONLINE && s.geminiKey.isNotBlank()
+        // Open the voice socket now so its ~0.7 s handshake overlaps the OCR/translation wait.
+        if (s.ttsEnabled && s.voiceMethod == VoiceMethod.ONLINE) edgeVoice.prewarm()
 
-        if (useGemini) {
-            val cacheKey = "${s.lang}|${normalizeText(mlkitText)}"
-            val cached = synchronized(geminiCache) { geminiCache[cacheKey] }
-            if (cached != null) {
-                original = cached.first
-                translated = cached.second.ifBlank { null }
-            } else {
-                val now = System.currentTimeMillis()
-                // Skip the API while in a 429 cooldown or under the rate gap → falls back to ML Kit.
-                if (now >= geminiCooldownUntil && now - lastGeminiCall >= minGeminiGap) {
-                    lastGeminiCall = now
-                    val jpeg = capturer?.captureRegion(Rect(rx, ry, rx + rw, ry + rh))?.let { bmp ->
-                        val out = java.io.ByteArrayOutputStream()
-                        bmp.compress(android.graphics.Bitmap.CompressFormat.JPEG, 85, out)
-                        bmp.recycle(); out.toByteArray()
-                    }
-                    if (jpeg != null) {
-                        val r = withContext(Dispatchers.IO) {
-                            runCatching { GeminiClient.ocrTranslate(s.geminiKey, jpeg, langName(s.lang)) }
-                        }
-                        r.exceptionOrNull()?.let { e ->
-                            val msg = e.message ?: e.javaClass.simpleName
-                            if (msg.contains("429")) {
-                                geminiCooldownUntil = System.currentTimeMillis() + geminiCooldown
-                                toastThrottled("Quota Gemini atteint → traduction hors-ligne temporaire")
-                            } else {
-                                toastThrottled("OCR Gemini ⚠️ $msg")
-                            }
-                        }
-                        val res = r.getOrNull()
-                        if (res != null && res.first.isNotBlank()) {
-                            original = res.first
-                            translated = res.second.ifBlank { null }
-                            // Guard against the model echoing the source instead of translating.
-                            if (translated != null && translated.equals(original, ignoreCase = true)) translated = null
-                            synchronized(geminiCache) { geminiCache[cacheKey] = original to (translated ?: "") }
-                        }
-                    }
-                }
+        val lines = reader.readPage(page, TargetLang(s.lang, langName(s.lang)))
+        val spoken = ArrayList<ReadLine>()
+        for (line in lines) {
+            if (line.original.isBlank()) continue
+            spoken.add(line)
+            // Spoken copy cleaned for the voice (stretched letters, "?!?!", ♪…); captions keep the text.
+            val toSpeak = SpeechText.prepare(line.translated ?: line.original)
+            if (s.ttsEnabled && toSpeak.isNotBlank()) {
+                speech.enqueue(
+                    SpeechItem(
+                        id = toSpeak.hashCode().toString(),
+                        text = toSpeak,
+                        // The voice follows the text actually read: the target language for a
+                        // translation, otherwise the bubble's own language (EN scan → EN voice).
+                        langTag = if (line.translated != null) s.lang else line.lang ?: detectSpokenLang(line.original),
+                        rate = s.speed,
+                        timbre = s.timbre,
+                        original = line.original,
+                        translated = line.translated,
+                    )
+                )
             }
-        }
-        // Offline ML Kit translation — primary path when offline, and the fallback when Gemini
-        // returned text but no translation.
-        if (translated == null && s.lang != "fr") {
-            translated = runCatching {
-                Translators.create(TranslationMethod.OFFLINE, s.provider, apiKeys).translate(original, s.lang)
-            }.getOrNull()
-        }
-
-        val toSpeak = translated ?: original
-        if (s.ttsEnabled) {
-            val provider: VoiceProvider =
-                if (s.voiceMethod == VoiceMethod.ONLINE) edgeVoice else deviceTts
-            val langTag = if (translated != null) s.lang else detectSpokenLang(original)
-            currentSpeechId = toSpeak.hashCode().toString()
-            provider.speak(toSpeak, langTag, s.speed, s.timbre)
-        }
-        withContext(Dispatchers.Main) { showCaption(original, translated) }
-        OverlayController.pushHistory(
-            HistoryEntry(
-                time = SimpleDateFormat("HH:mm", Locale.getDefault()).format(Date()),
-                original = original,
-                translated = translated,
-                langTag = if (translated != null) s.lang.uppercase() else null,
-                method = if (translated != null) s.method else null,
-                providerName = if (translated == null) null else if (useGemini) "Gemini" else "ML Kit",
+            OverlayController.pushHistory(
+                HistoryEntry(
+                    time = SimpleDateFormat("HH:mm", Locale.getDefault()).format(Date()),
+                    original = line.original,
+                    translated = line.translated,
+                    langTag = if (line.translated != null) s.lang.uppercase() else null,
+                    method = if (line.translated != null) s.method else null,
+                    providerName = line.provider,
+                )
             )
-        )
+        }
+        // Translate-only mode has no utterance pacing → show everything at once.
+        if (!s.ttsEnabled && spoken.isNotEmpty()) {
+            val original = spoken.joinToString("  ") { it.original }
+            val translated = spoken.mapNotNull { it.translated }.joinToString("  ").ifBlank { null }
+            withContext(Dispatchers.Main) { showCaption(original, translated) }
+        }
     }
 
-    /** Natural language name for the Gemini prompt target. */
-    private fun langName(code: String): String = when (code) {
-        "fr" -> "français"; "en" -> "anglais"; "es" -> "espagnol"; "ja" -> "japonais"; "pt" -> "portugais"
-        else -> "anglais"
-    }
+    /** Natural-language name of the target for the vision prompts ("anglais", "coréen", …). */
+    private fun langName(code: String): String =
+        Locale.forLanguageTag(code).getDisplayLanguage(Locale.FRENCH).ifBlank { "anglais" }
 
-    /** When reading untranslated source, pick a voice language: CJK -> Japanese, else French. */
-    private fun detectSpokenLang(text: String): String =
-        if (text.any { it.code in 0x3000..0x9FFF || it.code in 0xFF00..0xFFEF }) "ja" else "fr"
+    /** Voice language when reading untranslated source: Hangul → KO, CJK → JA, else FR. */
+    private fun detectSpokenLang(text: String): String = when {
+        text.any { it.code in 0xAC00..0xD7AF || it.code in 0x1100..0x11FF } -> "ko"
+        text.any { it.code in 0x3000..0x9FFF || it.code in 0xFF00..0xFFEF } -> "ja"
+        else -> "fr"
+    }
 
     private fun toastThrottled(msg: String) {
         val now = System.currentTimeMillis()
@@ -820,6 +1000,7 @@ class OverlayService : LifecycleService() {
     override fun onDestroy() {
         _running.value = false
         stopLoop()
+        speech.clear()
         listOfNotNull(bubble, frame, moveHandle, sizeHandle, controls, captionBar, langPopup, langScrim).forEach { runCatching { wm.removeView(it) } }
         capturer?.stop()
         runCatching { projection?.stop() }
@@ -834,19 +1015,42 @@ class OverlayService : LifecycleService() {
         const val EXTRA_DATA = "result_data"
         private const val CHANNEL = "animereader_service"
         private const val NOTIF_ID = 42
+        /** Capture period while the strip is scrolling (fast enough to follow the bubbles). */
+        private const val MOVING_INTERVAL_MS = 350L
+        /** Still captures still analysed (lets a bubble settle) before the OCR goes idle. */
+        private const val STILL_FRAMES_BEFORE_IDLE = 2
 
         private val _running = MutableStateFlow(false)
         val running: StateFlow<Boolean> = _running
     }
 }
 
-/** App-facing control surface for the overlay service + a small in-memory history bus. */
+/** App-facing control surface for the overlay service + the persisted reading history. */
 object OverlayController {
     val running: StateFlow<Boolean> get() = OverlayService.running
 
+    private val io = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    private var store: HistoryStore? = null
+
     private val _history = MutableStateFlow<List<HistoryEntry>>(emptyList())
     val history: StateFlow<List<HistoryEntry>> = _history
-    fun pushHistory(entry: HistoryEntry) { _history.value = (listOf(entry) + _history.value).take(40) }
+
+    /** Called once from Application.onCreate: reload the saved history from disk. */
+    fun bind(context: Context) {
+        if (store != null) return
+        val s = HistoryStore(context.applicationContext)
+        store = s
+        io.launch {
+            val loaded = s.load()
+            if (loaded.isNotEmpty()) _history.value = (_history.value + loaded).take(MAX_HISTORY)
+        }
+    }
+
+    fun pushHistory(entry: HistoryEntry) {
+        val next = (listOf(entry) + _history.value).take(MAX_HISTORY)
+        _history.value = next
+        store?.let { s -> io.launch { s.save(next) } }
+    }
 
     fun start(context: Context, resultCode: Int, data: Intent) {
         val i = Intent(context, OverlayService::class.java).apply {
@@ -860,4 +1064,6 @@ object OverlayController {
     fun stop(context: Context) {
         context.startService(Intent(context, OverlayService::class.java).apply { action = OverlayService.ACTION_STOP })
     }
+
+    private const val MAX_HISTORY = 100
 }

@@ -19,7 +19,7 @@ interface TranslationProvider {
 class MlKitTranslator : TranslationProvider {
     override suspend fun translate(text: String, targetCode: String): String {
         val target = TranslateLanguage.fromLanguageTag(targetCode) ?: return text
-        val source = detectSource(text)
+        val source = detectSource(text, target)
         if (source == target) return text
         val translator = Translation.getClient(
             TranslatorOptions.Builder().setSourceLanguage(source).setTargetLanguage(target).build()
@@ -32,13 +32,13 @@ class MlKitTranslator : TranslationProvider {
         }
     }
 
-    /** Heuristic: any CJK glyph → Japanese source, otherwise French (the prototype's source). */
-    private fun detectSource(text: String): String {
-        val cjk = text.any { c ->
-            val code = c.code
-            code in 0x3000..0x9FFF || code in 0xFF00..0xFFEF
-        }
-        return if (cjk) TranslateLanguage.JAPANESE else TranslateLanguage.FRENCH
+    /**
+     * Source language from [LangGuess]; when it can't tell, assume the usual pairing of this
+     * app's readers (English scans read in French, French scans read in another language).
+     */
+    private fun detectSource(text: String, target: String): String {
+        val guessed = LangGuess.guess(text)?.let { TranslateLanguage.fromLanguageTag(it) }
+        return guessed ?: if (target == TranslateLanguage.FRENCH) TranslateLanguage.ENGLISH else TranslateLanguage.FRENCH
     }
 }
 

@@ -3,16 +3,16 @@ package com.animereader.tts
 import android.content.Context
 import android.speech.tts.TextToSpeech
 import android.speech.tts.UtteranceProgressListener
+import android.speech.tts.Voice
 import android.util.Log
-import com.animereader.data.VoiceMethod
-import com.animereader.data.VoiceProviderId
-import com.animereader.internal.ApiKeys
 import kotlinx.coroutines.delay
 import java.util.Locale
 
 /** Speak a line of text. */
 interface VoiceProvider {
     suspend fun speak(text: String, langTag: String, rate: Float, timbre: String)
+    /** Hint that [text] will be spoken soon (online voices synthesize it ahead of time). */
+    fun prefetch(text: String, langTag: String, rate: Float, timbre: String) {}
     fun stop()
     fun shutdown()
 }
@@ -39,51 +39,39 @@ class DeviceTts(context: Context) : VoiceProvider {
         while (!ready && tries < 60) { delay(50); tries++ }
         if (!ready) { Log.w(TAG, "TTS non initialisé"); return }
         val locale = Locale.forLanguageTag(langTag)
-        if (tts.isLanguageAvailable(locale) >= TextToSpeech.LANG_AVAILABLE) tts.language = locale
+        if (tts.isLanguageAvailable(locale) >= TextToSpeech.LANG_AVAILABLE) {
+            tts.language = locale
+            bestVoice(locale)?.let { runCatching { tts.voice = it } }
+        }
         tts.setSpeechRate(rate.coerceIn(0.5f, 2f))
         // Timbre maps loosely to pitch (device voices vary).
         tts.setPitch(when (timbre) { "Masculine" -> 0.85f; "Neutre" -> 1.0f; else -> 1.1f })
         tts.speak(text, TextToSpeech.QUEUE_FLUSH, null, text.hashCode().toString())
     }
 
+    /**
+     * The engine's default voice for a language is often a low-quality or network one; prefer the
+     * best installed offline voice (same language, highest quality, lowest latency).
+     */
+    private fun bestVoice(locale: Locale): Voice? = runCatching {
+        tts.voices.orEmpty()
+            .filter { it.locale.language == locale.language && !it.isNetworkConnectionRequired }
+            .filter { KEY_NOT_INSTALLED !in it.features.orEmpty() }
+            .sortedWith(
+                compareByDescending<Voice> { it.locale.country == locale.country || it.locale.country == defaultCountry(locale.language) }
+                    .thenByDescending { it.quality }
+                    .thenBy { it.latency }
+            )
+            .firstOrNull()
+    }.getOrNull()
+
+    private fun defaultCountry(lang: String) = when (lang) { "fr" -> "FR"; "en" -> "US"; "pt" -> "BR"; else -> lang.uppercase() }
+
     override fun stop() { runCatching { tts.stop() } }
     override fun shutdown() { runCatching { tts.shutdown() } }
 
-    companion object { private const val TAG = "AnimeReader/TTS" }
-}
-
-/**
- * Online voice stub (ElevenLabs / Google Cloud TTS / OpenAI). Wire the real fetch-audio-and-play
- * here using [apiKey]; until then it transparently falls back to device TTS so reading still works.
- */
-class OnlineVoice(
-    private val provider: VoiceProviderId,
-    private val apiKey: String,
-    private val fallback: DeviceTts,
-) : VoiceProvider {
-    override suspend fun speak(text: String, langTag: String, rate: Float, timbre: String) {
-        try {
-            check(apiKey.isNotBlank()) { "Clé API ${provider.displayName} manquante" }
-            // TODO: fetch synthesized audio from the provider and play it via MediaPlayer/ExoPlayer.
-            throw NotImplementedError("Voix ${provider.displayName}: intégration à compléter")
-        } catch (e: Throwable) {
-            Log.w("AnimeReader/Voice", "${provider.displayName} indisponible (${e.message}) → repli TTS appareil")
-            fallback.speak(text, langTag, rate, timbre)
-        }
-    }
-
-    override fun stop() = fallback.stop()
-    override fun shutdown() {}
-}
-
-object Voices {
-    fun create(
-        method: VoiceMethod,
-        provider: VoiceProviderId,
-        apiKeys: ApiKeys,
-        device: DeviceTts,
-    ): VoiceProvider = when (method) {
-        VoiceMethod.OFFLINE -> device
-        VoiceMethod.ONLINE -> OnlineVoice(provider, apiKeys.forVoice(provider), device)
+    companion object {
+        private const val TAG = "AnimeReader/TTS"
+        private const val KEY_NOT_INSTALLED = "notInstalled" // TextToSpeech.Engine.KEY_FEATURE_NOT_INSTALLED
     }
 }
