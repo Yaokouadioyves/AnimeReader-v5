@@ -36,6 +36,7 @@ import com.animereader.MainActivity
 import com.animereader.R
 import com.animereader.capture.ScreenCapturer
 import com.animereader.data.Catalog
+import com.animereader.data.ScanScript
 import com.animereader.data.HistoryEntry
 import com.animereader.data.HistoryStore
 import com.animereader.data.Settings
@@ -50,11 +51,13 @@ import com.animereader.internal.RateGate
 import com.animereader.internal.TextDedup
 import com.animereader.ocr.Box
 import com.animereader.ocr.BubbleClusters
+import com.animereader.ocr.ScanText
 import com.animereader.ocr.ScreenOcr
 import com.animereader.pipeline.BubbleReader
 import com.animereader.pipeline.PageBubble
 import com.animereader.pipeline.ReadLine
 import com.animereader.pipeline.TargetLang
+import com.animereader.pipeline.TextTranslation
 import com.animereader.pipeline.VisionBatchCall
 import com.animereader.pipeline.VisionOcrCall
 import com.animereader.translate.GoogleWebTranslator
@@ -178,18 +181,11 @@ class OverlayService : LifecycleService() {
                     gate = RateGate(minGapMs = 1500L, cooldownMs = 45000L),
                 ),
             ),
-            // Text fallback chain: keyless Google web translate (cloud NMT — the quality the
-            // screen-translate apps are known for) when online, then on-device ML Kit.
-            textTranslate = { text, code ->
-                val viaGoogle =
-                    if (settings.method == TranslationMethod.ONLINE)
-                        runCatching { googleWeb.translate(text, code) }.getOrNull()
-                    else null
-                if (viaGoogle != null) viaGoogle to "Google"
-                else runCatching {
-                    Translators.create(TranslationMethod.OFFLINE, settings.provider, apiKeys).translate(text, code)
-                }.getOrNull()?.let { it to "ML Kit" }
-            },
+            // Text chain for what the vision backends didn't translate: keyless Google web
+            // translate for the whole page in one request (cloud NMT — the quality the
+            // screen-translate apps are known for, plus the detected language of each bubble),
+            // then on-device ML Kit for whatever Google couldn't do.
+            textTranslate = { texts, code -> translateTexts(texts, code) },
             onNotice = { msg -> toastThrottled(msg) },
         )
         speech = SpeechQueue(
@@ -475,7 +471,7 @@ class OverlayService : LifecycleService() {
                 setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f); typeface = android.graphics.Typeface.DEFAULT_BOLD
             })
             row.addView(TextView(this).apply {
-                text = if (l.code == "fr") "Original" else l.label
+                text = l.label
                 setTextSize(TypedValue.COMPLEX_UNIT_SP, 13.5f)
             })
             card.addView(row)
@@ -557,11 +553,37 @@ class OverlayService : LifecycleService() {
         settings.method == TranslationMethod.ONLINE &&
             (settings.geminiKey.isNotBlank() || settings.mistralKey.isNotBlank())
 
-    /** OCR the frame, cluster blocks into bubbles (manga order) and crop each one. */
+    private suspend fun translateTexts(texts: List<String>, code: String): List<TextTranslation?> {
+        val viaGoogle =
+            if (settings.method == TranslationMethod.ONLINE)
+                runCatching { withContext(Dispatchers.IO) { googleWeb.translateBatch(texts, code) } }.getOrNull()
+            else null
+        return texts.mapIndexed { i, text ->
+            viaGoogle?.getOrNull(i)?.let { return@mapIndexed TextTranslation(it.text, "Google", it.detected) }
+            runCatching {
+                TextTranslation(
+                    Translators.create(TranslationMethod.OFFLINE, settings.provider, apiKeys).translate(text, code),
+                    "ML Kit", null,
+                )
+            }.getOrNull()
+        }
+    }
+
+    /**
+     * OCR the frame with the model of the scans' script, group the text into bubbles, drop
+     * scan-group watermarks and stray marks, order the bubbles for reading and crop each one.
+     */
     private suspend fun pageFromBitmap(bmp: Bitmap): List<PageBubble> {
-        val blocks = runCatching { ocr.recognizeBlocks(bmp) }.getOrDefault(emptyList())
-        val gap = (minOf(bmp.width, bmp.height) * 0.06f).toInt().coerceAtLeast(dp(10))
-        val bubbles = BubbleClusters.readingOrder(BubbleClusters.cluster(blocks, gap), rtl = true)
+        val s = settings
+        val pieces = runCatching { ocr.recognize(bmp, s.scanScript) }.getOrDefault(emptyList())
+        val clustered = if (s.scanScript == ScanScript.LATIN) {
+            BubbleClusters.clusterLines(pieces.filterNot { ScanText.isWatermark(it.text) })
+                .map { it.copy(text = ScanText.polish(it.text)) }
+        } else {
+            val gap = (minOf(bmp.width, bmp.height) * 0.06f).toInt().coerceAtLeast(dp(10))
+            BubbleClusters.cluster(pieces, gap)
+        }
+        val bubbles = BubbleClusters.readingOrder(clustered.filterNot { ScanText.isNoise(it.text) }, rtl = s.readingRtl)
         val withJpeg = visionEnabled()
         return bubbles.map { b -> PageBubble(b.text, if (withJpeg) cropJpeg(bmp, b.box) else null) }
     }
@@ -827,7 +849,9 @@ class OverlayService : LifecycleService() {
                     SpeechItem(
                         id = toSpeak.hashCode().toString(),
                         text = toSpeak,
-                        langTag = if (line.translated != null) s.lang else detectSpokenLang(line.original),
+                        // The voice follows the text actually read: the target language for a
+                        // translation, otherwise the bubble's own language (EN scan → EN voice).
+                        langTag = if (line.translated != null) s.lang else line.lang ?: detectSpokenLang(line.original),
                         rate = s.speed,
                         timbre = s.timbre,
                         original = line.original,

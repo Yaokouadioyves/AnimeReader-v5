@@ -30,6 +30,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.animereader.data.Catalog
+import com.animereader.data.ScanScript
 import com.animereader.data.Settings
 import com.animereader.data.TextProvider
 import com.animereader.data.TranslationMethod
@@ -55,7 +56,7 @@ fun SettingsSheet(
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
 
     val methodSub = if (settings.method == TranslationMethod.OFFLINE) "ML Kit — sur l'appareil"
-        else "IA cloud — Gemini (clé requise)"
+        else "Google Traduction (sans clé) · Gemini ou Mistral si une clé est saisie"
     val voiceSub = if (settings.voiceMethod == VoiceMethod.OFFLINE) "Moteur TTS de l'appareil"
         else "edge-tts — voix Microsoft neurale"
 
@@ -80,8 +81,22 @@ fun SettingsSheet(
                     ) { v -> onUpdate { it.copy(method = v) } }
                 }
                 Divider()
-                Stacked("Langue cible", "La traduction suit la langue choisie · « Original » = pas de traduction") {
+                Stacked("Langue cible", "Les bulles déjà dans cette langue sont lues telles quelles, sans traduction") {
                     LangGridMini(settings.lang) { code -> onUpdate { it.copy(lang = code) } }
+                }
+                Divider()
+                Stacked("Langue des scans", "Choisit le lecteur de texte adapté à l'écriture des pages") {
+                    Segment(
+                        options = ScanScript.entries.map { it.label to it },
+                        selected = settings.scanScript,
+                    ) { v -> onUpdate { it.copy(scanScript = v) } }
+                }
+                Divider()
+                Stacked("Sens de lecture", "Ordre dans lequel les bulles d'une page sont lues") {
+                    Segment(
+                        options = listOf("Manga ←" to true, "BD, webtoon →" to false),
+                        selected = settings.readingRtl,
+                    ) { v -> onUpdate { it.copy(readingRtl = v) } }
                 }
             }
 

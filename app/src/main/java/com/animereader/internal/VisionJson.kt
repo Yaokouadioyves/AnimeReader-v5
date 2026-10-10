@@ -26,15 +26,24 @@ object VisionJson {
         o.optString("original", "") to o.optString("translation", "")
     }.getOrNull()
 
-    /** {"bubbles":[{"original":…,"translation":…},…]} or a bare array → ordered list. */
+    /**
+     * {"bubbles":[{"n":1,"original":…,"translation":…},…]} or a bare array → list in image order.
+     * When every element carries a distinct image number "n" (1-based), answers are put back in
+     * that order, so a model that reorders or skips one can't shift every following bubble.
+     * Otherwise the reply order is kept; non-object entries become empty pairs (alignment kept).
+     */
     fun parseBatch(raw: String): List<Pair<String, String>> = runCatching {
         val s = unfence(raw)
         val arr: JSONArray =
             if (s.startsWith("[")) JSONArray(s)
             else JSONObject(s).optJSONArray("bubbles") ?: JSONArray()
-        (0 until arr.length()).mapNotNull { i ->
-            val o = arr.optJSONObject(i) ?: return@mapNotNull null
-            o.optString("original", "") to o.optString("translation", "")
-        }
+        val items = (0 until arr.length()).map { arr.optJSONObject(it) }
+        val pairs = items.map { o -> (o?.optString("original", "") ?: "") to (o?.optString("translation", "") ?: "") }
+        val numbers = items.map { it?.optInt("n", 0) ?: 0 }
+        if (numbers.all { it in 1..items.size + 3 } && numbers.toSet().size == numbers.size) {
+            val out = MutableList(numbers.max()) { "" to "" }
+            numbers.forEachIndexed { i, n -> out[n - 1] = pairs[i] }
+            out
+        } else pairs
     }.getOrDefault(emptyList())
 }

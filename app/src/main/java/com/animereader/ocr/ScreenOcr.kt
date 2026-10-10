@@ -2,103 +2,75 @@ package com.animereader.ocr
 
 import android.graphics.Bitmap
 import android.graphics.Rect
+import com.animereader.data.ScanScript
 import com.animereader.internal.await
 import com.google.mlkit.vision.common.InputImage
-import com.google.mlkit.vision.text.Text
 import com.google.mlkit.vision.text.TextRecognition
 import com.google.mlkit.vision.text.japanese.JapaneseTextRecognizerOptions
 import com.google.mlkit.vision.text.latin.TextRecognizerOptions
 
 /**
- * On-device OCR of a captured manga region. Pre-processes the image (upscale + grayscale +
- * contrast), tries the Japanese recogniser first (manga is usually JA) then the Latin one,
- * and assembles lines with furigana/noise filtering and manga reading order.
+ * On-device OCR of the captured reading rectangle, with the model chosen by the scans' script
+ * (like the screen-translate apps do) instead of always trying Japanese first: the Japanese
+ * model "reads" Latin lettering too, badly, so a French/English page never reached the Latin
+ * model. Positions are returned in ORIGINAL bitmap pixels (the pre-processing upscale is
+ * mapped back) for the bubble clustering.
  */
 class ScreenOcr {
     private val latin = TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS)
     private val japanese = TextRecognition.getClient(JapaneseTextRecognizerOptions.Builder().build())
 
-    suspend fun recognize(bitmap: Bitmap): String {
-        val prepped = MangaImage.prepare(bitmap)
-        val input = InputImage.fromBitmap(prepped, 0)
+    /**
+     * [ScanScript.LATIN] → text LINES (for [BubbleClusters.clusterLines]);
+     * [ScanScript.JAPANESE] → text blocks (vertical columns, for [BubbleClusters.cluster]),
+     * falling back to the Latin model when the Japanese one finds nothing.
+     */
+    suspend fun recognize(bitmap: Bitmap, script: ScanScript): List<OcrBlock> = when (script) {
+        ScanScript.LATIN -> latinLines(bitmap)
+        ScanScript.JAPANESE -> japaneseBlocks(bitmap)
+    }
+
+    /**
+     * Latin scans: plain upscale only. Grayscale + forced contrast (kept for Japanese) can merge
+     * coloured lettering into its background and thin anti-aliased strokes; the Latin model is
+     * trained on natural images.
+     */
+    private suspend fun latinLines(bitmap: Bitmap): List<OcrBlock> {
+        val prepped = MangaImage.upscale(bitmap)
+        val scale = prepped.width.toFloat() / bitmap.width.coerceAtLeast(1)
         return try {
-            val ja = runCatching { japanese.process(input).await() }.getOrNull()
-            val jaText = ja?.let { assemble(it) }.orEmpty()
-            if (jaText.isNotBlank()) return jaText
-            val lat = runCatching { latin.process(input).await() }.getOrNull()
-            lat?.let { assemble(it) }.orEmpty()
+            val t = latin.process(InputImage.fromBitmap(prepped, 0)).await()
+            t.textBlocks.flatMap { it.lines }.mapNotNull { piece(it.text, it.boundingBox, scale) }
         } finally {
             if (prepped !== bitmap) prepped.recycle()
         }
     }
 
-    /**
-     * OCR text blocks with their positions in ORIGINAL bitmap pixels (the pre-processing
-     * upscale is mapped back). Fonts that defeat recognition still get boxed, which is all
-     * the bubble clustering needs.
-     */
-    suspend fun recognizeBlocks(bitmap: Bitmap): List<OcrBlock> {
+    private suspend fun japaneseBlocks(bitmap: Bitmap): List<OcrBlock> {
         val prepped = MangaImage.prepare(bitmap)
         val scale = prepped.width.toFloat() / bitmap.width.coerceAtLeast(1)
         val input = InputImage.fromBitmap(prepped, 0)
         return try {
             val ja = runCatching { japanese.process(input).await() }.getOrNull()
-            val jaBlocks = ja?.let { blocksOf(it, scale) }.orEmpty()
+            val jaBlocks = ja?.textBlocks.orEmpty().mapNotNull { piece(it.text, it.boundingBox, scale) }
             if (jaBlocks.isNotEmpty()) return jaBlocks
             val lat = runCatching { latin.process(input).await() }.getOrNull()
-            lat?.let { blocksOf(it, scale) }.orEmpty()
+            lat?.textBlocks.orEmpty().mapNotNull { piece(it.text, it.boundingBox, scale) }
         } finally {
             if (prepped !== bitmap) prepped.recycle()
         }
     }
 
-    private fun blocksOf(t: Text, scale: Float): List<OcrBlock> {
+    private fun piece(raw: String, bb: Rect?, scale: Float): OcrBlock? {
+        bb ?: return null
         val s = if (scale <= 0f) 1f else scale
-        return t.textBlocks.mapNotNull { block ->
-            val bb = block.boundingBox ?: return@mapNotNull null
-            val text = block.text.replace("\n", " ").replace(Regex("\\s+"), " ").trim()
-            if (text.isBlank()) return@mapNotNull null
-            OcrBlock(
-                text,
-                Box(
-                    (bb.left / s).toInt(), (bb.top / s).toInt(),
-                    (bb.right / s).toInt(), (bb.bottom / s).toInt(),
-                ),
-            )
-        }
+        val text = raw.replace("\n", " ").replace(Regex("\\s+"), " ").trim()
+        if (text.isBlank()) return null
+        return OcrBlock(
+            text,
+            Box((bb.left / s).toInt(), (bb.top / s).toInt(), (bb.right / s).toInt(), (bb.bottom / s).toInt()),
+        )
     }
-
-    private class Line(val text: String, val box: Rect)
-
-    /** Filter furigana/noise (lines far smaller than the median) and order for reading. */
-    private fun assemble(t: Text): String {
-        val lines = ArrayList<Line>()
-        for (block in t.textBlocks) for (ln in block.lines) {
-            val bb = ln.boundingBox ?: continue
-            if (ln.text.isNotBlank()) lines.add(Line(ln.text, bb))
-        }
-        if (lines.isEmpty()) return ""
-
-        val heights = lines.map { it.box.height() }.sorted()
-        val median = heights[heights.size / 2].coerceAtLeast(1)
-        // Drop tiny lines (furigana / stray marks) unless that would remove everything.
-        val kept = lines.filter { it.box.height() >= median * 0.55 }.ifEmpty { lines }
-
-        // Vertical Japanese if most lines are taller than wide.
-        val vertical = kept.count { it.box.height() > it.box.width() } > kept.size / 2
-        val ordered = if (vertical) {
-            // columns right-to-left, then top-to-bottom within a column
-            kept.sortedWith(compareByDescending<Line> { it.box.centerX() / median }.thenBy { it.box.centerY() })
-        } else {
-            // rows top-to-bottom, then left-to-right within a row
-            kept.sortedWith(compareBy<Line> { it.box.centerY() / median }.thenBy { it.box.centerX() })
-        }
-        val sep = if (vertical) "" else " "
-        return normalize(ordered.joinToString(sep) { it.text })
-    }
-
-    private fun normalize(s: String): String =
-        s.replace("\n", " ").replace(Regex("\\s+"), " ").trim()
 
     fun close() {
         latin.close()

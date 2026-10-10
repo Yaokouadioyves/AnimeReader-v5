@@ -40,4 +40,22 @@ class VisionJsonTest {
         assertEquals(emptyList<Pair<String, String>>(), VisionJson.parseBatch("pas du JSON"))
         assertEquals(emptyList<Pair<String, String>>(), VisionJson.parseBatch("""{"autre":1}"""))
     }
+
+    @Test
+    fun `numbered answers are put back in image order`() {
+        val raw = """{"bubbles":[{"n":2,"original":"b","translation":"2"},{"n":1,"original":"a","translation":"1"}]}"""
+        assertEquals(listOf("a" to "1", "b" to "2"), VisionJson.parseBatch(raw))
+    }
+
+    @Test
+    fun `a skipped image leaves an empty slot instead of shifting the next bubbles`() {
+        val raw = """{"bubbles":[{"n":1,"original":"a","translation":"1"},{"n":3,"original":"c","translation":"3"}]}"""
+        assertEquals(listOf("a" to "1", "" to "", "c" to "3"), VisionJson.parseBatch(raw))
+    }
+
+    @Test
+    fun `without usable numbers the reply order is kept`() {
+        val raw = """{"bubbles":[{"n":1,"original":"a","translation":"1"},{"n":1,"original":"b","translation":"2"}]}"""
+        assertEquals(listOf("a" to "1", "b" to "2"), VisionJson.parseBatch(raw))
+    }
 }

@@ -30,6 +30,9 @@ data class Settings(
     val captionScale: Float = 1f,   // subtitle text size (0.85 / 1.0 / 1.2)
     val geminiKey: String = "",     // user's free Gemini API key (on-device only)
     val mistralKey: String = "",    // optional Mistral key — free fallback when Gemini is rate-limited
+    // What is being read: script of the scans (picks the OCR) and page reading direction.
+    val scanScript: ScanScript = ScanScript.LATIN,
+    val readingRtl: Boolean = true, // manga (and French/English manga scans): right-to-left
     // Overlay geometry, remembered across sessions (-1 = never placed yet)
     val rectX: Int = -1, val rectY: Int = -1, val rectW: Int = -1, val rectH: Int = -1,
     val bubbleX: Int = -1, val bubbleY: Int = -1,
@@ -61,6 +64,8 @@ class SettingsRepository(private val context: Context) {
         val captionScale = floatPreferencesKey("captionScale")
         val geminiKey = stringPreferencesKey("geminiKey")
         val mistralKey = stringPreferencesKey("mistralKey")
+        val scanScript = stringPreferencesKey("scanScript")
+        val readingRtl = booleanPreferencesKey("readingRtl")
         val rectX = intPreferencesKey("rectX")
         val rectY = intPreferencesKey("rectY")
         val rectW = intPreferencesKey("rectW")
@@ -91,6 +96,8 @@ class SettingsRepository(private val context: Context) {
             captionScale = p[Keys.captionScale] ?: d.captionScale,
             geminiKey = p[Keys.geminiKey] ?: d.geminiKey,
             mistralKey = p[Keys.mistralKey] ?: d.mistralKey,
+            scanScript = p[Keys.scanScript]?.let { enumOrNull<ScanScript>(it) } ?: d.scanScript,
+            readingRtl = p[Keys.readingRtl] ?: d.readingRtl,
             rectX = p[Keys.rectX] ?: d.rectX, rectY = p[Keys.rectY] ?: d.rectY,
             rectW = p[Keys.rectW] ?: d.rectW, rectH = p[Keys.rectH] ?: d.rectH,
             bubbleX = p[Keys.bubbleX] ?: d.bubbleX, bubbleY = p[Keys.bubbleY] ?: d.bubbleY,
@@ -120,6 +127,8 @@ class SettingsRepository(private val context: Context) {
                 captionScale = p[Keys.captionScale] ?: 1f,
                 geminiKey = p[Keys.geminiKey] ?: "",
                 mistralKey = p[Keys.mistralKey] ?: "",
+                scanScript = p[Keys.scanScript]?.let { enumOrNull<ScanScript>(it) } ?: ScanScript.LATIN,
+                readingRtl = p[Keys.readingRtl] ?: true,
                 rectX = p[Keys.rectX] ?: -1, rectY = p[Keys.rectY] ?: -1,
                 rectW = p[Keys.rectW] ?: -1, rectH = p[Keys.rectH] ?: -1,
                 bubbleX = p[Keys.bubbleX] ?: -1, bubbleY = p[Keys.bubbleY] ?: -1,
@@ -144,6 +153,8 @@ class SettingsRepository(private val context: Context) {
             p[Keys.captionScale] = next.captionScale
             p[Keys.geminiKey] = next.geminiKey
             p[Keys.mistralKey] = next.mistralKey
+            p[Keys.scanScript] = next.scanScript.name
+            p[Keys.readingRtl] = next.readingRtl
             p[Keys.rectX] = next.rectX; p[Keys.rectY] = next.rectY
             p[Keys.rectW] = next.rectW; p[Keys.rectH] = next.rectH
             p[Keys.bubbleX] = next.bubbleX; p[Keys.bubbleY] = next.bubbleY

@@ -39,7 +39,8 @@ class BubbleReaderTest {
 
     private fun reader(
         vararg backends: BubbleReader.Backend,
-        offline: suspend (String, String) -> Pair<String, String>? = { t, _ -> "ML[$t]" to "ML Kit" },
+        offline: suspend (List<String>, String) -> List<TextTranslation?> =
+            { ts, _ -> ts.map { TextTranslation("ML(${it.length})", "ML Kit", null) } },
         clock: () -> Long = { 1_000_000L },
     ) = BubbleReader(backends.toList(), offline, clock)
 
@@ -74,21 +75,54 @@ class BubbleReaderTest {
         val r = reader() // no online backends at all
         val line = r.read("bonjour", jpeg, target)
         assertEquals("bonjour", line.original)
-        assertEquals("ML[bonjour]", line.translated)
+        assertEquals("ML(7)", line.translated)
         assertEquals("ML Kit", line.provider)
     }
 
     @Test
-    fun `no translation when the target is the original language`() = runBlocking {
-        val r = reader()
-        val line = r.read("bonjour", jpeg, TargetLang("fr", "français"))
+    fun `a bubble already in the target language is read as is, without any call`() = runBlocking {
+        var calls = 0
+        val r = reader(offline = { ts, _ -> calls++; ts.map { TextTranslation("X", "Google", "en") } })
+        val line = r.read("Je ne sais pas ce qu'il veut.", jpeg, TargetLang("fr", "français"))
         assertNull(line.translated)
+        assertEquals("fr", line.lang)
+        assertEquals(0, calls)
+    }
+
+    @Test
+    fun `an English bubble is translated even when the target is French`() = runBlocking {
+        val r = reader(offline = { ts, _ -> ts.map { TextTranslation("Je ne sais pas.", "Google", "en") } })
+        val line = r.read("I don't know what you want.", jpeg, TargetLang("fr", "français"))
+        assertEquals("Je ne sais pas.", line.translated)
+        assertEquals("Google", line.provider)
+        assertEquals("en", line.lang)
+    }
+
+    @Test
+    fun `when the guess is unsure, the translator's detected language decides`() = runBlocking {
+        // "Bonjour" alone is too short to guess; Google answers it is already French.
+        val r = reader(offline = { ts, _ -> ts.map { TextTranslation("Hello", "Google", "fr") } })
+        val line = r.read("Bonjour", jpeg, TargetLang("fr", "français"))
+        assertNull(line.translated)
+        assertEquals("fr", line.lang)
+    }
+
+    @Test
+    fun `the text fallback translates a whole page in one call`() = runBlocking {
+        var calls = 0
+        val r = reader(offline = { ts, _ -> calls++; ts.map { TextTranslation("FR(${it.length})", "Google", "en") } })
+        val lines = r.readPage(
+            listOf(PageBubble("Where are you going?", null), PageBubble("Je suis là, tu vois.", null), PageBubble("Wait for me!", null)),
+            TargetLang("fr", "français"),
+        )
+        assertEquals(1, calls)
+        assertEquals(listOf("FR(20)", null, "FR(12)"), lines.map { it.translated })
     }
 
     @Test
     fun `a translation echoing the source counts as none`() = runBlocking {
         val gemini = FakeBackend(answer = { "Bonjour" to "BONJOUR" })
-        val r = reader(gemini.asBackend("Gemini"), offline = { _, _ -> null })
+        val r = reader(gemini.asBackend("Gemini"), offline = { ts, _ -> ts.map { null } })
         val line = r.read("bonjour", jpeg, target)
         assertEquals("Bonjour", line.original)
         assertNull(line.translated)
@@ -140,6 +174,6 @@ class BubbleReaderTest {
         val r = reader(gemini.asBackend("Gemini"))
         val lines = r.readPage(listOf(PageBubble("texte local", jpeg), PageBubble("autre", jpeg)), target)
         assertEquals(listOf("texte local", "autre"), lines.map { it.original })
-        assertEquals(listOf("ML[texte local]", "ML[autre]"), lines.map { it.translated })
+        assertEquals(listOf("ML(11)", "ML(5)"), lines.map { it.translated })
     }
 }

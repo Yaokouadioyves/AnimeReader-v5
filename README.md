@@ -52,6 +52,24 @@ de bigrammes + inclusion) avant de parler.
 
 ---
 
+## Lecture des scans français / anglais
+
+Inspirée de l'analyse de « Translate On Screen », puis améliorée pour les scans latins :
+
+1. **OCR selon la langue des scans** (réglage « Langue des scans », français/anglais par défaut) :
+   modèle latin direct, image seulement agrandie (pas de niveaux de gris/contraste forcé).
+2. **Regroupement en bulles par lignes** : même taille de lettrage (≤ 1,7×), écart vertical
+   inférieur à une ligne, chevauchement horizontal avec alignement centré/gauche/droite ; lignes
+   coupées en deux par l'OCR recollées. Ordre de lecture par rangées (réglage « Sens de lecture »).
+3. **Nettoyage** (`ScanText`) : mots coupés par un tiret recollés (« ATTEN- / DRE ») mais composés
+   gardés (« PEUT- / ÊTRE »), MAJUSCULES → casse normale (meilleures traductions, voix plus
+   naturelle), confusions « l/| → I », « 0 → O », filigranes et crédits de scan ignorés.
+4. **Traduire seulement ce qui doit l'être** (`LangGuess` + langue détectée par Google) : une bulle
+   déjà dans la langue cible est lue telle quelle, une bulle anglaise est traduite même si la cible
+   est le français ; la voix suit la langue du texte réellement lu.
+5. **Une requête par page** : Gemini/Mistral (vision, images numérotées, réponse remise en ordre
+   par numéro), puis Google Traduction sans clé pour toutes les bulles restantes en un seul appel.
+
 ## Architecture
 
 ```
@@ -61,9 +79,15 @@ com.animereader
 ├── data/                   Settings (DataStore), enums, catalogue (langues/providers), HistoryEntry
 ├── capture/ScreenCapturer  MediaProjection → ImageReader/VirtualDisplay → Bitmap recadré      [réel]
 ├── ocr/
-│   ├── ScreenOcr           OCR ML Kit (japonais puis latin), tri en ordre de lecture manga    [réel]
-│   └── MangaImage          prétraitement (upscale / niveaux de gris / contraste)              [réel]
-├── translate/Translators   MlKitTranslator (hors-ligne, réel) + OnlineTranslator (stub, inactif)
+│   ├── ScreenOcr           OCR ML Kit, modèle choisi selon la langue des scans (latin/japonais) [réel]
+│   ├── BubbleClusters      regroupement des lignes en bulles + ordre de lecture (manga/BD)    [réel]
+│   ├── ScanText            nettoyage du texte des scans (majuscules, tirets, filigranes)      [réel]
+│   └── MangaImage          prétraitement (upscale ; niveaux de gris/contraste pour le japonais)[réel]
+├── pipeline/BubbleReader   décisions OCR→traduction : cache, vision par lot, secours texte    [réel]
+├── translate/
+│   ├── GoogleWebTranslator Google Traduction sans clé, une requête par page + langue détectée [réel]
+│   ├── LangGuess           langue d'une bulle (fr/en/…): traduire ou lire tel quel, voix      [réel]
+│   └── Translators         MlKitTranslator (hors-ligne, réel) + OnlineTranslator (stub, inactif)
 ├── tts/
 │   ├── Voices              VoiceProvider + DeviceTts (TTS appareil, hors-ligne, réel)         [réel]
 │   └── EdgeVoice           voix neurale en ligne via Edge-TTS (WebSocket OkHttp, streaming)   [réel]
@@ -114,7 +138,8 @@ Contrairement aux versions précédentes, les providers en ligne ne sont **plus 
 ## Notes / simplifications de cette version
 - L'overlay (bulle + rectangle + dock + sous-titre) est en **Vues Android classiques** (plus robuste
   pour un overlay système) ; le reste de l'UI est en **Compose**. L'overlay suit la direction/thème choisis.
-- L'OCR détecte la langue source par heuristique (CJK → japonais, sinon français).
+- La langue d'une bulle est devinée sur l'appareil (`LangGuess` : mots fréquents, élisions,
+  accents) ; en cas de doute, c'est la langue détectée par Google Traduction qui tranche.
 - L'historique des lectures est collecté (`OverlayController.history`, 40 dernières) mais n'a pas
   encore d'écran Compose dédié.
 - Les icônes de l'UI sont dessinées au `Canvas` ; le logo « drapeaux croisés » du prototype n'est
