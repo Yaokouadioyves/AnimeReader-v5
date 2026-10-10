@@ -11,6 +11,8 @@
     <!-- Online translation / voice providers + ML Kit model download. -->
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <!-- In-app updates: hand the downloaded release APK to the system installer. -->
+    <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
 
     <!-- ML Kit OCR model is downloaded on demand by Google Play services. -->
     <application
@@ -37,6 +39,17 @@
             android:name=".service.OverlayService"
             android:exported="false"
             android:foregroundServiceType="mediaProjection" />
+
+        <!-- Shares the downloaded update APK (cache/updates) with the package installer. -->
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="${applicationId}.updates"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/update_paths" />
+        </provider>
 
         <meta-data
             android:name="com.google.mlkit.vision.DEPENDENCIES"
