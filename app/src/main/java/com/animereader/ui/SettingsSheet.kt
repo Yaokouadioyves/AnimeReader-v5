@@ -27,7 +27,6 @@ import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.animereader.BuildConfig
@@ -52,6 +51,7 @@ fun SettingsSheet(
     onUpdate: ((Settings) -> Settings) -> Unit,
     onStop: () -> Unit,
     onClose: () -> Unit,
+    onCheckUpdate: () -> Unit,
 ) {
     val pal = LocalPalette.current
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
@@ -195,18 +195,17 @@ fun SettingsSheet(
 
             GroupLabel("Application")
             Card {
-                val uri = LocalUriHandler.current
                 Row(
-                    Modifier.fillMaxWidth().clickable { uri.openUri(RELEASES_URL) }.padding(vertical = 14.dp),
+                    Modifier.fillMaxWidth().clickable { onCheckUpdate() }.padding(vertical = 14.dp),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
                     Column(Modifier.weight(1f)) {
                         LabelText(
                             "Mises à jour",
-                            "Version ${BuildConfig.VERSION_NAME} · ouvre la page des versions sur GitHub",
+                            "Version ${BuildConfig.VERSION_NAME} · vérifiée aussi à chaque ouverture de l'appli",
                         )
                     }
-                    Text("Ouvrir", color = pal.accent, fontSize = fs(13f), fontWeight = FontWeight.Bold)
+                    Text("Rechercher", color = pal.accent, fontSize = fs(13f), fontWeight = FontWeight.Bold)
                 }
             }
 
@@ -217,9 +216,6 @@ fun SettingsSheet(
         }
     }
 }
-
-/** Every merge into main is published there by the CI (signed with the same key → installs over). */
-private const val RELEASES_URL = "https://github.com/Yaokouadioyves/AnimeReader-v5/releases/latest"
 
 @Composable
 private fun GroupLabel(text: String) {
