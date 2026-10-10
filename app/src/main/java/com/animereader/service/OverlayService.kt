@@ -36,7 +36,6 @@ import com.animereader.MainActivity
 import com.animereader.R
 import com.animereader.capture.ScreenCapturer
 import com.animereader.data.Catalog
-import com.animereader.data.ScanScript
 import com.animereader.data.HistoryEntry
 import com.animereader.data.HistoryStore
 import com.animereader.data.Settings
@@ -48,14 +47,17 @@ import com.animereader.internal.FrameDiff
 import com.animereader.internal.GeminiClient
 import com.animereader.internal.MistralClient
 import com.animereader.internal.RateGate
-import com.animereader.internal.TextDedup
 import com.animereader.ocr.Box
+import com.animereader.ocr.Bubble
 import com.animereader.ocr.BubbleClusters
+import com.animereader.ocr.BubbleEdges
+import com.animereader.ocr.Edge
 import com.animereader.ocr.ScanText
 import com.animereader.ocr.ScreenOcr
 import com.animereader.pipeline.BubbleReader
 import com.animereader.pipeline.PageBubble
 import com.animereader.pipeline.ReadLine
+import com.animereader.pipeline.ScrollTracker
 import com.animereader.pipeline.TargetLang
 import com.animereader.pipeline.TextTranslation
 import com.animereader.pipeline.VisionBatchCall
@@ -74,6 +76,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -142,8 +145,8 @@ class OverlayService : LifecycleService() {
     @Volatile private var lastSpeechId: String? = null
     // Written from the capture loop and replay coroutines → keep visibility across threads.
     @Volatile private var lastOcrErr = 0L
-    private val recentSpoken = ArrayDeque<String>()
-    private val stableFrames = 2
+    /** Which bubbles of the scrolling strip are whole, settled and not read yet. */
+    private val tracker = ScrollTracker()
     @Volatile private var lastGrid: IntArray? = null
 
     // Geometry (screen pixels)
@@ -544,13 +547,15 @@ class OverlayService : LifecycleService() {
     private fun replayCurrent() {
         lifecycleScope.launch(Dispatchers.Default) {
             val bmp = capturer?.captureRegion(Rect(rx, ry, rx + rw, ry + rh)) ?: return@launch
-            val page = pageFromBitmap(bmp)
+            val frame = analyzeFrame(bmp)
+            // Everything visible except the tail of a bubble that already went past the top.
+            val ready = frame.withIndex()
+                .filter { it.value.edge != Edge.CUT_TOP }
+                .map { ScrollTracker.Ready(it.index, it.value.bubble.text) }
+            val page = toPage(bmp, frame, ready)
             bmp.recycle()
             if (page.isEmpty()) return@launch
-            val norm = TextDedup.normalize(page.joinToString(" ") { it.mlkitText })
-            synchronized(recentSpoken) {
-                if (norm !in recentSpoken) { recentSpoken.addLast(norm); while (recentSpoken.size > 8) recentSpoken.removeFirst() }
-            }
+            synchronized(tracker) { ready.forEach { tracker.markRead(it.text) } }
             handlePage(page)
         }
     }
@@ -575,23 +580,49 @@ class OverlayService : LifecycleService() {
         }
     }
 
+    /** One bubble of a capture and whether an edge of the rectangle cuts it. */
+    private class FrameBubble(val bubble: Bubble, val edge: Edge)
+
     /**
-     * OCR the frame with the model of the scans' script, group the text into bubbles, drop
-     * scan-group watermarks and stray marks, order the bubbles for reading and crop each one.
+     * OCR the frame, group the text lines into bubbles, drop scan-group watermarks and stray
+     * marks, order the bubbles for reading and tell, for each one, whether it is whole or cut
+     * by the top/bottom of the rectangle (see [BubbleEdges]).
      */
-    private suspend fun pageFromBitmap(bmp: Bitmap): List<PageBubble> {
-        val s = settings
-        val pieces = runCatching { ocr.recognize(bmp, s.scanScript) }.getOrDefault(emptyList())
-        val clustered = if (s.scanScript == ScanScript.LATIN) {
+    private suspend fun analyzeFrame(bmp: Bitmap): List<FrameBubble> {
+        val pieces = runCatching { ocr.recognize(bmp) }.getOrDefault(emptyList())
+        val bubbles = BubbleClusters.readingOrder(
             BubbleClusters.clusterLines(pieces.filterNot { ScanText.isWatermark(it.text) })
                 .map { it.copy(text = ScanText.polish(it.text)) }
-        } else {
-            val gap = (minOf(bmp.width, bmp.height) * 0.06f).toInt().coerceAtLeast(dp(10))
-            BubbleClusters.cluster(pieces, gap)
+                .filterNot { ScanText.isNoise(it.text) },
+            rtl = settings.readingRtl,
+        )
+        var grid: BubbleEdges.Grid? = null // built only when some text comes near an edge
+        return bubbles.map { b ->
+            val near = BubbleEdges.nearTop(b.box, b.lineHeight) ||
+                BubbleEdges.nearBottom(b.box, b.lineHeight, bmp.height)
+            val outline = if (near) {
+                val g = grid ?: edgeGrid(bmp).also { grid = it }
+                BubbleEdges.probe(g, b.box)
+            } else null
+            FrameBubble(b, BubbleEdges.classify(b.box, b.lineHeight, bmp.height, outline))
         }
-        val bubbles = BubbleClusters.readingOrder(clustered.filterNot { ScanText.isNoise(it.text) }, rtl = s.readingRtl)
+    }
+
+    /** Darkest-pixel grid of the capture (~400 cells on the long side) for the outline probe. */
+    private fun edgeGrid(bmp: Bitmap): BubbleEdges.Grid {
+        val w = bmp.width; val h = bmp.height
+        val px = IntArray(w * h)
+        bmp.getPixels(px, 0, w, 0, 0, w, h)
+        return BubbleEdges.minPool(px, w, h, (maxOf(w, h) / 400).coerceAtLeast(1))
+    }
+
+    /** The bubbles to read now, with their crop for the vision backends (if enabled). */
+    private fun toPage(bmp: Bitmap, frame: List<FrameBubble>, ready: List<ScrollTracker.Ready>): List<PageBubble> {
         val withJpeg = visionEnabled()
-        return bubbles.map { b -> PageBubble(b.text, if (withJpeg) cropJpeg(bmp, b.box) else null) }
+        return ready.map { r ->
+            val crop = r.index?.takeIf { withJpeg }?.let { cropJpeg(bmp, frame[it].bubble.box) }
+            PageBubble(r.text, crop)
+        }
     }
 
     /** Crop a bubble (with padding), downscale big crops, and JPEG-encode for upload. */
@@ -774,45 +805,50 @@ class OverlayService : LifecycleService() {
     }
 
     // ── Capture → bubbles → OCR → translate → speak ──
+    /**
+     * Vertical-scroll reading: capture often while the strip moves (every [MOVING_INTERVAL_MS]),
+     * hand each capture to the [tracker], which releases a bubble as soon as it is whole and its
+     * text has settled. Reading/translating runs in its own coroutine so the capture keeps
+     * following the scroll meanwhile. Once the page has been still for a few captures the OCR is
+     * skipped until something moves again (battery).
+     */
     private fun startLoop() {
         if (captureJob?.isActive == true) return
-        synchronized(recentSpoken) { recentSpoken.clear() }
+        synchronized(tracker) { tracker.reset() }
         lastGrid = null
         captureJob = lifecycleScope.launch(Dispatchers.Default) {
-            var pending = ""
-            var stable = 0
-            while (isActive && expanded && playing) {
-                if (interacting) { delay(150); continue }   // don't read while the frame is moving
-                val region = Rect(rx, ry, rx + rw, ry + rh)
-                val bmp = capturer?.captureRegion(region)
-                if (bmp != null) {
-                    // Cheap luminance diff: while the page hasn't moved and the current text is
-                    // already settled, skip the OCR entirely (battery + CPU).
-                    val grid = sampleGrid(bmp)
-                    val unchanged = FrameDiff.changedFraction(lastGrid, grid) < 0.006
-                    lastGrid = grid
-                    if (unchanged && stable >= stableFrames) {
-                        bmp.recycle()
-                    } else {
-                        val page = pageFromBitmap(bmp)
-                        bmp.recycle()
-                        val norm = TextDedup.normalize(page.joinToString(" ") { it.mlkitText })
-                        var trigger = false
-                        if (norm.length >= 2) {
-                            if (norm == pending) stable++ else { pending = norm; stable = 1 }
-                            // Read only once the OCR has settled (same text across captures) and
-                            // the page isn't a repeat/continuation of something we just read.
-                            if (stable == stableFrames && !isRecentDuplicate(norm)) {
-                                trigger = true
-                                synchronized(recentSpoken) {
-                                    recentSpoken.addLast(norm); while (recentSpoken.size > 8) recentSpoken.removeFirst()
-                                }
+            val pages = Channel<List<PageBubble>>(Channel.UNLIMITED)
+            launch { for (page in pages) handlePage(page) }
+            var stillCount = 0
+            try {
+                while (isActive && expanded && playing) {
+                    if (interacting) { delay(150); continue }   // don't read while the frame is moving
+                    val region = Rect(rx, ry, rx + rw, ry + rh)
+                    val bmp = capturer?.captureRegion(region)
+                    if (bmp != null) {
+                        val grid = sampleGrid(bmp)
+                        val still = FrameDiff.changedFraction(lastGrid, grid) < 0.006
+                        lastGrid = grid
+                        stillCount = if (still) stillCount + 1 else 0
+                        if (stillCount > STILL_FRAMES_BEFORE_IDLE) {
+                            bmp.recycle()
+                        } else {
+                            val frame = analyzeFrame(bmp)
+                            val ready = synchronized(tracker) {
+                                tracker.onFrame(frame.map { ScrollTracker.Seen(it.bubble.text, it.edge) }, still)
                             }
+                            val page = toPage(bmp, frame, ready)
+                            bmp.recycle()
+                            if (page.isNotEmpty()) pages.send(page)
                         }
-                        if (trigger) handlePage(page)
                     }
+                    delay(
+                        if (stillCount == 0) MOVING_INTERVAL_MS
+                        else (settings.captureInterval * 1000).toLong().coerceAtLeast(400)
+                    )
                 }
-                delay((settings.captureInterval * 1000).toLong().coerceAtLeast(400))
+            } finally {
+                pages.close()
             }
         }
     }
@@ -824,11 +860,6 @@ class OverlayService : LifecycleService() {
         s.getPixels(px, 0, 32, 0, 0, 32, 32)
         if (s !== bmp) s.recycle()
         return FrameDiff.luminance(px)
-    }
-
-    private fun isRecentDuplicate(norm: String): Boolean {
-        val snapshot = synchronized(recentSpoken) { recentSpoken.toList() }
-        return TextDedup.isDuplicate(norm, snapshot)
     }
 
     private fun stopLoop() { captureJob?.cancel(); captureJob = null }
@@ -984,6 +1015,10 @@ class OverlayService : LifecycleService() {
         const val EXTRA_DATA = "result_data"
         private const val CHANNEL = "animereader_service"
         private const val NOTIF_ID = 42
+        /** Capture period while the strip is scrolling (fast enough to follow the bubbles). */
+        private const val MOVING_INTERVAL_MS = 350L
+        /** Still captures still analysed (lets a bubble settle) before the OCR goes idle. */
+        private const val STILL_FRAMES_BEFORE_IDLE = 2
 
         private val _running = MutableStateFlow(false)
         val running: StateFlow<Boolean> = _running

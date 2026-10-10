@@ -27,10 +27,11 @@ import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import com.animereader.BuildConfig
 import com.animereader.data.Catalog
-import com.animereader.data.ScanScript
 import com.animereader.data.Settings
 import com.animereader.data.TextProvider
 import com.animereader.data.TranslationMethod
@@ -83,13 +84,6 @@ fun SettingsSheet(
                 Divider()
                 Stacked("Langue cible", "Les bulles déjà dans cette langue sont lues telles quelles, sans traduction") {
                     LangGridMini(settings.lang) { code -> onUpdate { it.copy(lang = code) } }
-                }
-                Divider()
-                Stacked("Langue des scans", "Choisit le lecteur de texte adapté à l'écriture des pages") {
-                    Segment(
-                        options = ScanScript.entries.map { it.label to it },
-                        selected = settings.scanScript,
-                    ) { v -> onUpdate { it.copy(scanScript = v) } }
                 }
                 Divider()
                 Stacked("Sens de lecture", "Ordre dans lequel les bulles d'une page sont lues") {
@@ -146,7 +140,7 @@ fun SettingsSheet(
                     }
                     Divider()
                 }
-                Stacked("Intervalle de capture", "Fréquence de relecture de la zone") {
+                Stacked("Intervalle de capture", "Page immobile : fréquence de vérification · pendant le défilement, 3 captures par seconde") {
                     Segment(options = Catalog.captureIntervals.map { "${it}s" to it }, selected = settings.captureInterval, compact = true) { v ->
                         onUpdate { it.copy(captureInterval = v) }
                     }
@@ -199,6 +193,23 @@ fun SettingsSheet(
                 }
             }
 
+            GroupLabel("Application")
+            Card {
+                val uri = LocalUriHandler.current
+                Row(
+                    Modifier.fillMaxWidth().clickable { uri.openUri(RELEASES_URL) }.padding(vertical = 14.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Column(Modifier.weight(1f)) {
+                        LabelText(
+                            "Mises à jour",
+                            "Version ${BuildConfig.VERSION_NAME} · ouvre la page des versions sur GitHub",
+                        )
+                    }
+                    Text("Ouvrir", color = pal.accent, fontSize = fs(13f), fontWeight = FontWeight.Bold)
+                }
+            }
+
             if (running) {
                 Spacer(Modifier.size(18.dp))
                 DangerButton("Arrêter AnimeReader", onClick = onStop)
@@ -206,6 +217,9 @@ fun SettingsSheet(
         }
     }
 }
+
+/** Every merge into main is published there by the CI (signed with the same key → installs over). */
+private const val RELEASES_URL = "https://github.com/Yaokouadioyves/AnimeReader-v5/releases/latest"
 
 @Composable
 private fun GroupLabel(text: String) {

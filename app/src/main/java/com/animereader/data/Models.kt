@@ -15,12 +15,6 @@ enum class TextProvider(val displayName: String, val org: String) {
     GOOGLE("Google", "Cloud Translate"),
 }
 
-/** Script of the scans being read — picks the on-device OCR model and bubble grouping. */
-enum class ScanScript(val label: String) {
-    LATIN("Français / anglais"),
-    JAPANESE("Japonais"),
-}
-
 /** Voice (TTS) backend. */
 enum class VoiceMethod { OFFLINE, ONLINE }
 

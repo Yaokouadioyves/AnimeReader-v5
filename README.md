@@ -16,6 +16,13 @@ Jetpack Compose, `minSdk 26`, `compileSdk 34`.
 > génère le wrapper et télécharge les dépendances. Sinon, avec un Gradle 8.9 installé :
 > `gradle wrapper` puis `./gradlew assembleDebug`.
 
+**Versions publiées** : la CI construit un APK *release* (téléphones arm64 seulement, ~30 Mo au lieu
+de ~120 Mo) signé avec **une clé fixe** (secrets `ANDROID_KEYSTORE_BASE64`, `ANDROID_KEYSTORE_PASSWORD`,
+`ANDROID_KEY_ALIAS`, `ANDROID_KEY_PASSWORD`) : chaque nouvelle version s'installe par-dessus la
+précédente sans perdre les réglages. Numéro de version = numéro de build CI (5.N). Chaque fusion
+dans `main` publie l'APK sur la page **Releases** du dépôt ; l'appli y renvoie (Réglages → Mises à
+jour). L'original de la clé est conservé hors dépôt par le propriétaire.
+
 1. Android Studio → *Open* → ce dossier.
 2. *Run* sur un appareil **physique** Android 8.0+ (la capture d'écran et l'overlay ne sont pas
    pleinement testables sur émulateur sans contenu sous la bulle).
@@ -45,10 +52,24 @@ entièrement **hors-ligne** (voir plus bas).
 - **Arrêter** → depuis la notification, ou le bouton dans l'accueil / les réglages.
 - Le rectangle **baisse d'opacité** après ~2,5 s sans interaction.
 
-Boucle de lecture (quand le rectangle est ouvert et en lecture) : capture de la zone → OCR →
-traduction → TTS (si activé) → ajout à l'historique + sous-titre transitoire. La boucle attend que
-l'OCR se **stabilise** (même texte sur 2 captures) et déduplique les bulles déjà lues (similarité
-de bigrammes + inclusion) avant de parler.
+Boucle de lecture (quand le rectangle est ouvert et en lecture), pensée pour la **lecture
+verticale** (le contenu monte quand on lit vers le bas) : capture ~3 fois par seconde pendant le
+défilement (intervalle réglable quand la page est immobile, OCR coupé après quelques captures
+immobiles) → OCR → bulles → **suivi bulle par bulle** (`ScrollTracker`) → traduction → TTS dans
+une coroutine à part, pour que la capture continue de suivre le défilement.
+
+- Une bulle **entière** est lue dès que son texte est identique sur 2 captures, puis jamais relue.
+- Une bulle **coupée en bas** du rectangle est attendue (elle remonte entière à la capture
+  suivante) ; si la page s'arrête là, elle est lue seulement si son texte finit une phrase.
+- Une bulle **coupée en haut** a déjà été lue plus bas : ignorée.
+- Une bulle **plus haute que le rectangle** est reconstituée au fil des captures par les lignes
+  communes, et lue quand sa fin apparaît.
+
+« Coupée ou entière » (`BubbleEdges`) : texte à moins d'≈1,2 hauteur de ligne d'un bord = peut-être
+coupée ; on remplit alors l'intérieur clair de la bulle depuis le texte (« pot de peinture », sur
+une grille qui garde le pixel le plus sombre pour ne pas perdre un contour fin) : remplissage
+enfermé = bulle entière, sortie par un bord = coupée de ce côté, fuite d'un côté à l'autre (texte
+sans contour, fréquent en webtoon) = indécis, la marge du texte décide.
 
 ---
 
@@ -56,8 +77,8 @@ de bigrammes + inclusion) avant de parler.
 
 Inspirée de l'analyse de « Translate On Screen », puis améliorée pour les scans latins :
 
-1. **OCR selon la langue des scans** (réglage « Langue des scans », français/anglais par défaut) :
-   modèle latin direct, image seulement agrandie (pas de niveaux de gris/contraste forcé).
+1. **OCR latin** (le modèle japonais a été retiré : scans français/anglais uniquement) : image
+   seulement agrandie (pas de niveaux de gris/contraste forcé).
 2. **Regroupement en bulles par lignes** : même taille de lettrage (≤ 1,7×), écart vertical
    inférieur à une ligne, chevauchement horizontal avec alignement centré/gauche/droite ; lignes
    coupées en deux par l'OCR recollées. Ordre de lecture par rangées (réglage « Sens de lecture »).
@@ -79,11 +100,14 @@ com.animereader
 ├── data/                   Settings (DataStore), enums, catalogue (langues/providers), HistoryEntry
 ├── capture/ScreenCapturer  MediaProjection → ImageReader/VirtualDisplay → Bitmap recadré      [réel]
 ├── ocr/
-│   ├── ScreenOcr           OCR ML Kit, modèle choisi selon la langue des scans (latin/japonais) [réel]
+│   ├── ScreenOcr           OCR ML Kit (modèle latin), lignes positionnées dans la capture      [réel]
 │   ├── BubbleClusters      regroupement des lignes en bulles + ordre de lecture (manga/BD)    [réel]
+│   ├── BubbleEdges         bulle entière ou coupée par un bord (marge + contour) — testé JVM   [réel]
 │   ├── ScanText            nettoyage du texte des scans (majuscules, tirets, filigranes)      [réel]
-│   └── MangaImage          prétraitement (upscale ; niveaux de gris/contraste pour le japonais)[réel]
-├── pipeline/BubbleReader   décisions OCR→traduction : cache, vision par lot, secours texte    [réel]
+│   └── MangaImage          prétraitement (agrandissement des petites lettres)                 [réel]
+├── pipeline/
+│   ├── BubbleReader        décisions OCR→traduction : cache, vision par lot, secours texte    [réel]
+│   └── ScrollTracker       quelles bulles lire pendant le défilement vertical — testé JVM     [réel]
 ├── translate/
 │   ├── GoogleWebTranslator Google Traduction sans clé, une requête par page + langue détectée [réel]
 │   ├── LangGuess           langue d'une bulle (fr/en/…): traduire ou lire tel quel, voix      [réel]
@@ -103,8 +127,8 @@ com.animereader
 
 ### Ce qui est **fonctionnel hors-ligne** (sans clé)
 - **Capture d'écran** (MediaProjection) et recadrage sur la zone sélectionnée.
-- **OCR** via ML Kit (japonais + latin, modèles téléchargés à la première utilisation), avec
-  assemblage des lignes en ordre de lecture (vertical droite→gauche pour le japonais).
+- **OCR** via ML Kit (modèle latin embarqué), avec regroupement des lignes en bulles et ordre de
+  lecture.
 - **Traduction hors-ligne** via ML Kit Translate (modèles téléchargés à la demande).
 - **TTS hors-ligne** via le moteur de l'appareil (`android.speech.tts`).
 - UI Compose complète : onboarding, accueil, réglages, 3 directions × thème clair/sombre,

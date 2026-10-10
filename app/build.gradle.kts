@@ -14,6 +14,11 @@ val localProps = Properties().apply {
 }
 fun key(name: String): String = (localProps.getProperty(name) ?: "")
 
+// CI build number → version (each build installs over the previous one), and the fixed release
+// key from the CI secrets: every APK must carry the SAME signature or Android refuses to update.
+val ciBuild = System.getenv("GITHUB_RUN_NUMBER")?.toIntOrNull()
+val releaseKeystore = System.getenv("ANDROID_KEYSTORE_FILE")?.let { file(it) }?.takeIf { it.exists() }
+
 android {
     namespace = "com.animereader"
     compileSdk = 34
@@ -22,8 +27,12 @@ android {
         applicationId = "com.animereader"
         minSdk = 26
         targetSdk = 34
-        versionCode = 1
-        versionName = "5.0"
+        versionCode = ciBuild ?: 1
+        versionName = "5.${ciBuild ?: 0}"
+
+        // Phones only: the x86 / x86_64 / 32-bit copies of the ML Kit native libraries (emulators,
+        // old devices) were ~85 MB of the APK.
+        ndk { abiFilters += "arm64-v8a" }
 
         // Online providers read these at runtime (stubs today). Supply in local.properties:
         //   OPENAI_API_KEY=sk-...
@@ -36,11 +45,25 @@ android {
         buildConfigField("String", "ELEVENLABS_API_KEY", "\"${key("ELEVENLABS_API_KEY")}\"")
     }
 
+    signingConfigs {
+        if (releaseKeystore != null) create("fixed") {
+            storeFile = releaseKeystore
+            storePassword = System.getenv("ANDROID_KEYSTORE_PASSWORD")
+            keyAlias = System.getenv("ANDROID_KEY_ALIAS")
+            keyPassword = System.getenv("ANDROID_KEY_PASSWORD")
+        }
+    }
+
     buildTypes {
         release {
             isMinifyEnabled = false
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
+            // No key (local build, PR from a fork): fall back to the debug key so it still installs.
+            signingConfig = signingConfigs.findByName("fixed") ?: signingConfigs.getByName("debug")
         }
+    }
+    lint {
+        checkReleaseBuilds = false
     }
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
@@ -72,7 +95,6 @@ dependencies {
     implementation(libs.kotlinx.coroutines.android)
 
     implementation(libs.mlkit.text.recognition)
-    implementation(libs.mlkit.text.recognition.japanese)
     implementation(libs.mlkit.translate)
     implementation(libs.okhttp)
 
