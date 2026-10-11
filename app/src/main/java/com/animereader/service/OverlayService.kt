@@ -590,19 +590,22 @@ class OverlayService : LifecycleService() {
      */
     private suspend fun analyzeFrame(bmp: Bitmap): List<FrameBubble> {
         val pieces = runCatching { ocr.recognize(bmp) }.getOrDefault(emptyList())
+        var grid: BubbleEdges.Grid? = null // built only when the outlines are needed
+        fun grid() = grid ?: edgeGrid(bmp).also { grid = it }
         val bubbles = BubbleClusters.readingOrder(
-            BubbleClusters.clusterLines(pieces.filterNot { ScanText.isWatermark(it.text) })
+            BubbleClusters.clusterLines(
+                pieces.filterNot { ScanText.isWatermark(it.text) },
+                apart = { upper, lower -> BubbleEdges.separated(grid(), upper, lower) },
+            )
                 .map { it.copy(text = ScanText.polish(it.text)) }
                 .filterNot { ScanText.isNoise(it.text) },
             rtl = settings.readingRtl,
         )
-        var grid: BubbleEdges.Grid? = null // built only when some text comes near an edge
         return bubbles.map { b ->
             val near = BubbleEdges.nearTop(b.box, b.lineHeight) ||
                 BubbleEdges.nearBottom(b.box, b.lineHeight, bmp.height)
             val outline = if (near) {
-                val g = grid ?: edgeGrid(bmp).also { grid = it }
-                BubbleEdges.probe(g, b.box)
+                BubbleEdges.probe(grid(), b.box)
             } else null
             FrameBubble(b, BubbleEdges.classify(b.box, b.lineHeight, bmp.height, outline))
         }

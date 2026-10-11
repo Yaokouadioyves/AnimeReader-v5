@@ -99,6 +99,35 @@ object BubbleEdges {
         return tail + 1
     }
 
+    /**
+     * True when a dark line crosses the gap between two stacked text lines ([upper] above
+     * [lower], boxes in PIXELS) over most of their common width: the outlines of two bubbles
+     * placed one under the other. Their lines may be close enough to look like one bubble —
+     * this keeps them apart. Dark/saturated backgrounds are inconclusive (false).
+     */
+    fun separated(grid: Grid, upper: Box, lower: Box): Boolean {
+        val w = grid.w; val h = grid.h; val f = grid.factor
+        val l = (maxOf(upper.left, lower.left) / f).coerceIn(0, w - 1)
+        val r = ((minOf(upper.right, lower.right) - 1) / f).coerceIn(0, w - 1)
+        // One cell of margin on each side: glyph bottoms/tops and accents spill out of the boxes.
+        val t = (upper.bottom / f + 1).coerceIn(0, h - 1)
+        val b = (lower.top / f - 1).coerceIn(0, h - 1)
+        if (r - l < 2 || b < t) return false
+        val band = ArrayList<Int>((r - l + 1) * (b - t + 1))
+        for (y in t..b) for (x in l..r) band.add(grid.lum[y * w + x])
+        band.sort()
+        val paper = band[band.size * 3 / 4]
+        if (paper < MIN_PAPER) return false
+        val threshold = paper - INK_DROP
+        val need = ((r - l + 1) * SEPARATOR_SPAN).toInt().coerceAtLeast(2)
+        for (y in t..b) {
+            var dark = 0
+            for (x in l..r) if (grid.lum[y * w + x] < threshold) dark++
+            if (dark >= need) return true
+        }
+        return false
+    }
+
     /** True when [box] comes within ~1.2 line heights of the top / bottom of the rectangle. */
     fun nearTop(box: Box, lineHeight: Int): Boolean = box.top <= margin(lineHeight)
     fun nearBottom(box: Box, lineHeight: Int, regionHeight: Int): Boolean =
@@ -127,4 +156,5 @@ object BubbleEdges {
 
     private const val MIN_PAPER = 150
     private const val INK_DROP = 45
+    private const val SEPARATOR_SPAN = 0.6
 }

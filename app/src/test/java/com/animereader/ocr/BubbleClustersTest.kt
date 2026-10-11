@@ -99,4 +99,14 @@ class BubbleClustersTest {
         assertEquals(listOf("droite", "gauche"), BubbleClusters.readingOrder(listOf(left, right), rtl = true).map { it.text })
         assertEquals(listOf("gauche", "droite"), BubbleClusters.readingOrder(listOf(right, left), rtl = false).map { it.text })
     }
+
+    @Test fun stackedLinesStayApartWhenTheVetoSaysTwoBubbles() {
+        val lines = listOf(
+            line("PREMIÈRE BULLE.", 70, 60, 230, 72),
+            line("DEUXIÈME BULLE.", 70, 80, 230, 92), // 8 px under: close enough to be grouped
+        )
+        assertEquals(1, BubbleClusters.clusterLines(lines).size)
+        val apart = BubbleClusters.clusterLines(lines, apart = { upper, lower -> upper.top == 60 && lower.top == 80 })
+        assertEquals(2, apart.size)
+    }
 }
