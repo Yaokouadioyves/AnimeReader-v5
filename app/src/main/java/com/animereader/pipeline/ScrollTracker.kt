@@ -110,7 +110,12 @@ class ScrollTracker(private val memory: Int = 40, private val tallMaxAge: Int = 
         if (TextDedup.normalize(rest.text).length < MIN_REMAINDER_CHARS) null else null to rest
     }
 
-    /** [s] without the already-read text at its start and/or end; null when there is none. */
+    /**
+     * [s] without the already-read text at its start and/or end; null when there is none.
+     * The bubble just read, seen again, is stripped down to its last word (the run always
+     * leaves one): that remainder is found in the bubble already read — or, after an OCR slip,
+     * only differs from its end by a letter — so it is a repeat, not a new bubble.
+     */
     private fun unreadPart(s: Seen): Seen? {
         if (read.isEmpty()) return null
         var words = s.text.split(' ').filter { it.isNotBlank() }
@@ -131,7 +136,15 @@ class ScrollTracker(private val memory: Int = 40, private val tallMaxAge: Int = 
             }
             break
         }
-        return if (changed) Seen(words.joinToString(" "), edge) else null
+        if (!changed) return null
+        val rest = TextDedup.normalize(words.joinToString(" "))
+        val repeat = read.any { it.contains(rest) } || (words.size <= 2 && read.any { r ->
+            maxOf(
+                TextDedup.bigramSimilarity(r.takeLast(rest.length), rest),
+                TextDedup.bigramSimilarity(r.takeLast(rest.length + 2), rest),
+            ) >= TAIL_SIMILARITY
+        })
+        return if (repeat) Seen("", edge) else Seen(words.joinToString(" "), edge)
     }
 
     /**
@@ -174,6 +187,7 @@ class ScrollTracker(private val memory: Int = 40, private val tallMaxAge: Int = 
         private const val MIN_OVERLAP_CHARS = 8
         private const val STRIP_SIMILARITY = 0.8
         private const val MIN_REMAINDER_CHARS = 4
+        private const val TAIL_SIMILARITY = 0.6
 
         /**
          * A bubble that can be read (and drawn over) on a still page: whole, or cut at the

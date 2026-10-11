@@ -89,10 +89,10 @@ fun SettingsSheet(
                 Stacked(
                     "Affichage de la traduction",
                     if (settings.overlayMode) "Écrite sur chaque bulle quand la page s'arrête · disparaît dès que vous touchez l'écran"
-                    else "Dans la barre de sous-titres, en bas de l'écran",
+                    else "Pas affichée · la page reste en version originale (lecture à voix haute seulement)",
                 ) {
                     Segment(
-                        options = listOf("Sur les bulles" to true, "Sous-titres" to false),
+                        options = listOf("Sur les bulles" to true, "Masquée" to false),
                         selected = settings.overlayMode,
                     ) { v -> onUpdate { it.copy(overlayMode = v) } }
                 }
@@ -155,13 +155,6 @@ fun SettingsSheet(
                     Segment(options = Catalog.captureIntervals.map { "${it}s" to it }, selected = settings.captureInterval, compact = true) { v ->
                         onUpdate { it.copy(captureInterval = v) }
                     }
-                }
-                Divider()
-                Stacked("Taille des sous-titres", "Texte de la barre de sous-titres") {
-                    Segment(
-                        options = listOf("Petit" to 0.85f, "Moyen" to 1f, "Grand" to 1.2f),
-                        selected = settings.captionScale, compact = true,
-                    ) { v -> onUpdate { it.copy(captionScale = v) } }
                 }
                 Divider()
                 Inline("Lecture automatique", "Démarrer dès qu'un texte est détecté") {

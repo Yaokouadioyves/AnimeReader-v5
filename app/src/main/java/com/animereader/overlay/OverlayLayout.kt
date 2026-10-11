@@ -86,16 +86,17 @@ object OverlayLayout {
     /**
      * Cells of the [n]×[n] change-detection grid (see FrameDiff) that a drawn translation
      * covers: the capture sees our own drawing there, so only the page around it can tell
-     * whether the user scrolled.
+     * whether the user scrolled. [margin] more cells around each box absorb the outline of the
+     * bubble being read and the anti-aliased edges.
      */
-    fun gridMask(boxes: List<Box>, regionW: Int, regionH: Int, n: Int): BooleanArray {
+    fun gridMask(boxes: List<Box>, regionW: Int, regionH: Int, n: Int, margin: Int = 0): BooleanArray {
         val mask = BooleanArray(n * n)
         if (regionW <= 0 || regionH <= 0) return mask
         for (bx in boxes) {
-            val c0 = (bx.left.toLong() * n / regionW).toInt().coerceIn(0, n - 1)
-            val c1 = ((bx.right - 1).toLong() * n / regionW).toInt().coerceIn(c0, n - 1)
-            val r0 = (bx.top.toLong() * n / regionH).toInt().coerceIn(0, n - 1)
-            val r1 = ((bx.bottom - 1).toLong() * n / regionH).toInt().coerceIn(r0, n - 1)
+            val c0 = ((bx.left.toLong() * n / regionW).toInt() - margin).coerceIn(0, n - 1)
+            val c1 = (((bx.right - 1).toLong() * n / regionW).toInt() + margin).coerceIn(c0, n - 1)
+            val r0 = ((bx.top.toLong() * n / regionH).toInt() - margin).coerceIn(0, n - 1)
+            val r1 = (((bx.bottom - 1).toLong() * n / regionH).toInt() + margin).coerceIn(r0, n - 1)
             for (r in r0..r1) for (c in c0..c1) mask[r * n + c] = true
         }
         return mask

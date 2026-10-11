@@ -74,7 +74,8 @@ sans contour, fréquent en webtoon) = indécis, la marge du texte décide.
 ### Traduction écrite sur les bulles
 
 Réglage « Affichage de la traduction » (ou bouton 文A du dock) : **Sur les bulles** (par défaut)
-ou **Sous-titres**.
+ou **Masquée** (la page reste en version originale, seule la voix lit). Il n'y a plus de
+barre de sous-titres.
 
 - Dès que la page s'arrête, chaque bulle entière (ou coupée en bas mais finissant une phrase) est
   traduite et **écrite par-dessus son texte**, sur un fond de la couleur de la bulle (couleur la
@@ -83,7 +84,9 @@ ou **Sous-titres**.
   cadre (`OverlayLayout`, testé JVM). La bulle lue à voix haute est entourée.
 - **Un toucher n'importe où** efface les traductions (petite fenêtre invisible qui reçoit
   `ACTION_OUTSIDE`) ; à défaut, la capture surveille la page **autour** des traductions (cases
-  masquées dans la comparaison) et les efface au premier défilement. Elles reviennent à l'arrêt
+  masquées, plus une case de marge) et ne les efface que si au moins 12 % de cette zone change
+  sur deux captures de suite : une barre de défilement qui s'estompe, une image qui finit de se
+  charger ou une pub animée ne les font plus disparaître. Elles reviennent à l'arrêt
   suivant, instantanément pour les bulles déjà traduites (cache).
 - Pendant qu'elles sont affichées, l'OCR est suspendu (la capture voit notre propre dessin) ; après
   effacement, 250 ms de pause et tout texte identique à une traduction affichée est ignoré.
@@ -192,7 +195,7 @@ Contrairement aux versions précédentes, les providers en ligne ne sont **plus 
 ---
 
 ## Notes / simplifications de cette version
-- L'overlay (bulle + rectangle + dock + sous-titre) est en **Vues Android classiques** (plus robuste
+- L'overlay (bulle + rectangle + dock) est en **Vues Android classiques** (plus robuste
   pour un overlay système) ; le reste de l'UI est en **Compose**. L'overlay suit la direction/thème choisis.
 - La langue d'une bulle est devinée sur l'appareil (`LangGuess` : mots fréquents, élisions,
   accents) ; en cas de doute, c'est la langue détectée par Google Traduction qui tranche.

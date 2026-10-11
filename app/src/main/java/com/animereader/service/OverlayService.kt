@@ -133,10 +133,6 @@ class OverlayService : LifecycleService() {
     private var moveHandle: View? = null
     private var sizeHandle: View? = null
     private var controls: View? = null
-    private var captionBar: View? = null
-    private var captionMain: TextView? = null
-    private var captionSub: TextView? = null
-    private var captionExpanded = false
     private var playImg: ImageView? = null
     private var langBtn: TextView? = null
     private var methodDot: View? = null
@@ -224,10 +220,8 @@ class OverlayService : LifecycleService() {
                 lastSpeechId = item.id
                 speakingOriginal = item.original
                 ui.post {
-                    // Overlay mode: the translation is already on the bubble → outline it; a bubble
-                    // read while the page scrolls (nothing drawn yet) still gets its subtitle.
+                    // The translation is already drawn on the bubble → outline it while it is read.
                     if (settings.overlayMode && frame?.hasKey(item.original) == true) frame?.highlight(item.original)
-                    else showCaption(item.original, item.translated)
                 }
             },
             // Synthesize the next bubbles while the current one plays → no gap between them.
@@ -257,13 +251,11 @@ class OverlayService : LifecycleService() {
         }
     }
 
-    /** Providers report completion here; the queue advances, and the caption hides when idle. */
+    /** Providers report completion here; the queue advances, and the outline goes when idle. */
     private fun onUtteranceDone(id: String?) {
         speech.signalDone(id)
         ui.post {
             if (settings.ttsEnabled && id != null && id == lastSpeechId && speech.currentId == null) {
-                ui.removeCallbacks(hideCaption)
-                captionBar?.visibility = View.GONE
                 frame?.highlight(null)
             }
         }
@@ -402,18 +394,6 @@ class OverlayService : LifecycleService() {
             wm.addView(it, overlayParams(WindowManager.LayoutParams.MATCH_PARENT, WindowManager.LayoutParams.WRAP_CONTENT, true).apply {
                 gravity = Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL; y = dp(24)
             })
-        }
-
-        // Subtitle bar just above the dock (its own window so the blur-behind only frosts the bar)
-        captionBar = buildCaptionBar().also {
-            val lp = overlayParams(WindowManager.LayoutParams.WRAP_CONTENT, WindowManager.LayoutParams.WRAP_CONTENT, touchable = true).apply {
-                gravity = Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL; y = dp(100)
-            }
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-                lp.flags = lp.flags or WindowManager.LayoutParams.FLAG_BLUR_BEHIND
-                lp.setBlurBehindRadius(dp(16))
-            }
-            wm.addView(it, lp)
         }
 
         // Language dropdown views are built now but only attached to the window manager while
@@ -713,39 +693,6 @@ class OverlayService : LifecycleService() {
         return out.toByteArray()
     }
 
-    /** Subtitle bar: dark high-contrast scrim, white translation (translation-only),
-     *  tap to reveal the original. Theme-independent so it stays readable over any page. */
-    private fun buildCaptionBar(): View {
-        val maxW = displaySize().first - dp(40)
-        val bar = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            gravity = Gravity.CENTER_HORIZONTAL
-            setPadding(dp(18), dp(12), dp(18), dp(12))
-            background = GradientDrawable().apply { cornerRadius = dp(16).toFloat(); setColor(AColor.argb(186, 8, 8, 12)) }
-            visibility = View.GONE
-        }
-        captionMain = TextView(this).apply {
-            setTextColor(AColor.WHITE)
-            gravity = Gravity.CENTER
-            maxWidth = maxW
-            setLineSpacing(0f, 1.1f)
-        }
-        captionSub = TextView(this).apply {
-            setTextColor(AColor.argb(155, 255, 255, 255))
-            gravity = Gravity.CENTER
-            maxWidth = maxW
-            setPadding(0, dp(5), 0, 0)
-            visibility = View.GONE
-        }
-        bar.addView(captionMain); bar.addView(captionSub)
-        bar.setOnClickListener {
-            captionExpanded = !captionExpanded
-            captionSub?.visibility =
-                if (captionExpanded && (captionSub?.text?.isNotEmpty() == true)) View.VISIBLE else View.GONE
-        }
-        return bar
-    }
-
     // ── Touch handlers ──
     private fun attachBubbleTouch(view: View, lp: WindowManager.LayoutParams) {
         var startX = 0; var startY = 0; var rawX = 0f; var rawY = 0f
@@ -850,7 +797,7 @@ class OverlayService : LifecycleService() {
         if (value) { playing = true; wake(); startLoop(); updateDock() }
         else {
             playing = false; stopLoop(); speech.clear(); stopSpeaking(); clearOverlays()
-            ui.removeCallbacks(hideCaption); captionBar?.visibility = View.GONE; closeLangPopup()
+            closeLangPopup()
         }
     }
 
@@ -892,6 +839,7 @@ class OverlayService : LifecycleService() {
             launch { for (w in work) handleWork(w) }
             var stillCount = 0
             var overlayAsked = false // translations requested for the current still page
+            var movedWatches = 0     // consecutive watches that saw the page move around them
             try {
                 while (isActive && expanded && playing) {
                     if (interacting) { clearOverlays(); delay(150); continue } // the frame is moving
@@ -906,16 +854,22 @@ class OverlayService : LifecycleService() {
 
                     val drawn = overlayBoxes
                     if (drawn.isNotEmpty()) {
-                        val mask = OverlayLayout.gridMask(drawn, bmp.width, bmp.height, GRID)
+                        // Only a real scroll hides them (a touch already did, the moment it came):
+                        // most of the page around them must change, on two watches in a row — a
+                        // fading scrollbar, an image finishing to load or an animated ad don't count.
+                        val mask = OverlayLayout.gridMask(drawn, bmp.width, bmp.height, GRID, margin = 1)
                         bmp.recycle()
-                        if (FrameDiff.changedFraction(lastGrid, grid, ignore = mask) >= STILL_DIFF) {
+                        val moved = FrameDiff.changedFraction(lastGrid, grid, ignore = mask) >= OVERLAY_MOVED_DIFF
+                        movedWatches = if (moved) movedWatches + 1 else 0
+                        if (movedWatches >= 2) {
                             clearOverlays() // scrolled without a touch we saw
-                            lastGrid = null; stillCount = 0; overlayAsked = false
+                            lastGrid = null; stillCount = 0; overlayAsked = false; movedWatches = 0
                         } else {
-                            pause(OVERLAY_WATCH_MS)
+                            pause(if (moved) MOVING_INTERVAL_MS else OVERLAY_WATCH_MS)
                         }
                         continue
                     }
+                    movedWatches = 0
                     if (System.currentTimeMillis() < ocrPausedUntil) { bmp.recycle(); delay(40); continue }
 
                     val still = FrameDiff.changedFraction(lastGrid, grid) < STILL_DIFF
@@ -1014,12 +968,9 @@ class OverlayService : LifecycleService() {
         view.setShown(shown.map { it.first })
         overlayBoxes = shown.map { it.second }
         recentOverlay = Long.MAX_VALUE to items.map { TextDedup.normalize(it.second.translated!!) }
-        // The bubble being read right now gets its outline instead of the subtitle.
+        // The bubble being read right now gets its outline.
         val speaking = speakingOriginal?.takeIf { speech.currentId != null }
-        if (speaking != null && view.hasKey(speaking)) {
-            view.highlight(speaking)
-            ui.removeCallbacks(hideCaption); captionBar?.visibility = View.GONE
-        }
+        if (speaking != null && view.hasKey(speaking)) view.highlight(speaking)
     }
 
     /** Hides the drawn translations (any thread) and voids the ones still being computed. */
@@ -1070,11 +1021,9 @@ class OverlayService : LifecycleService() {
         if (s.ttsEnabled && s.voiceMethod == VoiceMethod.ONLINE) edgeVoice.prewarm()
 
         val lines = reader.readPage(page, TargetLang(s.lang, langName(s.lang)))
-        val spoken = ArrayList<ReadLine>()
         for (line in lines) {
             if (line.original.isBlank()) continue
-            spoken.add(line)
-            // Spoken copy cleaned for the voice (stretched letters, "?!?!", ♪…); captions keep the text.
+            // Spoken copy cleaned for the voice (stretched letters, "?!?!", ♪…); the drawing keeps the text.
             val toSpeak = SpeechText.prepare(line.translated ?: line.original)
             if (s.ttsEnabled && toSpeak.isNotBlank()) {
                 speech.enqueue(
@@ -1102,13 +1051,6 @@ class OverlayService : LifecycleService() {
                 )
             )
         }
-        // Translate-only mode has no utterance pacing → show everything at once.
-        // (Overlay mode: the translations get drawn on the bubbles once the page stops.)
-        if (!s.ttsEnabled && !s.overlayMode && spoken.isNotEmpty()) {
-            val original = spoken.joinToString("  ") { it.original }
-            val translated = spoken.mapNotNull { it.translated }.joinToString("  ").ifBlank { null }
-            withContext(Dispatchers.Main) { showCaption(original, translated) }
-        }
     }
 
     /** Natural-language name of the target for the vision prompts ("anglais", "coréen", …). */
@@ -1130,30 +1072,6 @@ class OverlayService : LifecycleService() {
         }
     }
 
-    private fun showCaption(original: String, translated: String?) {
-        val main = captionMain ?: return
-        val sub = captionSub ?: return
-        val bar = captionBar ?: return
-        val scale = settings.captionScale
-        main.setTextSize(TypedValue.COMPLEX_UNIT_SP, 17f * scale)
-        sub.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12.5f * scale)
-        // Translation-only by default: the translation is the main line; the original (FR)
-        // is the secondary line, hidden until the user taps the bar.
-        if (!translated.isNullOrBlank()) {
-            main.text = translated
-            sub.text = original
-        } else {
-            main.text = original
-            sub.text = ""
-        }
-        sub.visibility = if (captionExpanded && sub.text.isNotEmpty()) View.VISIBLE else View.GONE
-        bar.visibility = View.VISIBLE
-        ui.removeCallbacks(hideCaption)
-        // When reading aloud, the utterance's onDone hides it; keep a long safety fallback.
-        // In translate-only mode there's no audio, so use a fixed readable duration.
-        ui.postDelayed(hideCaption, if (settings.ttsEnabled) 12000L else 4500L)
-    }
-    private val hideCaption = Runnable { captionBar?.visibility = View.GONE }
 
     private fun openApp() {
         startActivity(Intent(this, MainActivity::class.java).apply {
@@ -1196,7 +1114,7 @@ class OverlayService : LifecycleService() {
         _running.value = false
         stopLoop()
         speech.clear()
-        listOfNotNull(bubble, frame, touchWatcher, moveHandle, sizeHandle, controls, captionBar, langPopup, langScrim).forEach { runCatching { wm.removeView(it) } }
+        listOfNotNull(bubble, frame, touchWatcher, moveHandle, sizeHandle, controls, langPopup, langScrim).forEach { runCatching { wm.removeView(it) } }
         capturer?.stop()
         runCatching { projection?.stop() }
         ocr.close(); deviceTts.shutdown(); edgeVoice.shutdown()
@@ -1219,6 +1137,8 @@ class OverlayService : LifecycleService() {
         private const val STILL_DIFF = 0.006
         /** Translations drawn: how often the page around them is checked for a scroll. */
         private const val OVERLAY_WATCH_MS = 400L
+        /** Share of the page around the translations that must change to count as a scroll. */
+        private const val OVERLAY_MOVED_DIFF = 0.12
         /** After hiding them, captures may still show them for a frame or two. */
         private const val OVERLAY_HIDE_SETTLE_MS = 250L
         /** How long OCR text matching a hidden translation is taken for our own drawing. */

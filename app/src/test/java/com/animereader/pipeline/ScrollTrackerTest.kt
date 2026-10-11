@@ -189,4 +189,52 @@ class ScrollTrackerTest {
         t.onFrame(listOf(glued), still = true)
         assertEquals(listOf("Oui, je n'ai plus le choix."), texts(t.flushStill(listOf(glued))))
     }
+
+    // ── The bubble just read must not have its last word read again ──
+
+    @Test fun bubbleStayingOnScreenIsNeverPartlyReadAgain() {
+        val t = ScrollTracker()
+        val b = Seen("Tu crois vraiment que je vais te laisser partir ?", Edge.COMPLETE)
+        t.onFrame(listOf(b), still = false)
+        assertEquals(listOf(b.text), texts(t.onFrame(listOf(b), still = false)))
+        repeat(5) { assertEquals(emptyList<String>(), texts(t.onFrame(listOf(b), still = it > 1))) }
+        assertEquals(emptyList<String>(), texts(t.flushStill(listOf(b))))
+    }
+
+    @Test fun ocrSlipOnTheLastWordIsNotANewBubble() {
+        val t = ScrollTracker()
+        val b = Seen("Je ne te laisserai jamais faire une chose pareille, Kenji !", Edge.COMPLETE)
+        t.onFrame(listOf(b), false); t.onFrame(listOf(b), false)
+        val slips = listOf(
+            "Je ne te laisserai jamais faire une chose pareille, Kenjl !",
+            "Je ne te laisserai jamais faire une chose pareille. Kenji",
+            "Je ne te laisserai jamais faire une chose pareille, Ken ji !",
+        )
+        for (txt in slips) {
+            val s = Seen(txt, Edge.COMPLETE)
+            assertEquals(txt, emptyList<String>(), texts(t.onFrame(listOf(s), false)))
+            assertEquals(txt, emptyList<String>(), texts(t.onFrame(listOf(s), true)))
+            assertEquals(txt, emptyList<String>(), texts(t.flushStill(listOf(s))))
+        }
+    }
+
+    @Test fun pageStoppingRightAfterAReadDoesNotRepeatItsEnd() {
+        val t = ScrollTracker()
+        val b = Seen("On y va maintenant, sinon on va rater le dernier train.", Edge.COMPLETE)
+        t.onFrame(listOf(b), false)
+        assertEquals(listOf(b.text), texts(t.onFrame(listOf(b), false)))
+        // The page stops: overlay mode flushes the still capture.
+        val ready = t.onFrame(listOf(b), true) + t.flushStill(listOf(b))
+        assertEquals(emptyList<String>(), texts(ready))
+    }
+
+    @Test fun newBubbleGluedUnderTheReadOneIsStillRead() {
+        val t = ScrollTracker()
+        val a = Seen("Tu es sûr de vouloir y aller seul ?", Edge.COMPLETE)
+        t.onFrame(listOf(a), false); t.onFrame(listOf(a), false)
+        val glued = Seen("Tu es sûr de vouloir y aller seul ? Oui, je n'ai plus le choix.", Edge.COMPLETE)
+        t.onFrame(listOf(glued), false)
+        assertEquals(listOf("Oui, je n'ai plus le choix."), texts(t.onFrame(listOf(glued), false)))
+        repeat(3) { assertEquals(emptyList<String>(), texts(t.onFrame(listOf(glued), true))) }
+    }
 }
