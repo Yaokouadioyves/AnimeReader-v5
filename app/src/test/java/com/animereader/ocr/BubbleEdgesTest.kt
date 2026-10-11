@@ -104,4 +104,31 @@ class BubbleEdgesTest {
         assertEquals(1, g.w); assertEquals(1, g.h)
         assertEquals(0, g.lum[0])
     }
+
+    // ── Two bubbles one under the other: an outline between their lines ──
+
+    private val upperLine = Box(70, 60, 230, 72)
+    private val lowerLine = Box(70, 104, 230, 116)
+
+    @Test fun outlineBetweenTwoStackedBubblesSeparatesThem() {
+        val c = Canvas(300, 200, white)
+        c.bubble(40, 10, 260, 90, black, white)
+        c.bubble(40, 88, 260, 170, black, white) // touching the first one
+        c.text(70, 60, 230, 1, 12); c.text(70, 104, 230, 1, 12)
+        assertEquals(true, BubbleEdges.separated(c.grid(2), upperLine, lowerLine))
+    }
+
+    @Test fun linesOfOneBubbleAreNotSeparated() {
+        val c = Canvas(300, 200, grey)
+        c.bubble(40, 10, 260, 170, black, white)
+        c.text(70, 60, 230, 1, 12); c.text(70, 104, 230, 1, 12)
+        assertEquals(false, BubbleEdges.separated(c.grid(2), upperLine, lowerLine))
+    }
+
+    @Test fun aGlyphTailCrossingTheGapIsNotAnOutline() {
+        val c = Canvas(300, 200, white)
+        c.text(70, 60, 230, 1, 12); c.text(70, 104, 230, 1, 12)
+        c.fill(140, 72, 146, 104, black) // a long descender / stroke, narrow
+        assertEquals(false, BubbleEdges.separated(c.grid(2), upperLine, lowerLine))
+    }
 }

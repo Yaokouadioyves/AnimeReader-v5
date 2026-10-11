@@ -32,8 +32,10 @@ object BubbleClusters {
      *    centred, left or right alignment (bubble lettering is usually centred),
      *  - or the same text line split in two pieces by the OCR.
      * The bubble text is its lines in reading order, joined/cleaned by [ScanText.joinLines].
+     * [apart] (upper line, lower line) vetoes joining two stacked lines — e.g. an outline drawn
+     * between them ([BubbleEdges.separated]): two bubbles one right under the other.
      */
-    fun clusterLines(lines: List<OcrBlock>): List<Bubble> {
+    fun clusterLines(lines: List<OcrBlock>, apart: ((Box, Box) -> Boolean)? = null): List<Bubble> {
         val usable = lines.filter { it.text.isNotBlank() && it.box.width > 0 && it.box.height > 0 }
         if (usable.isEmpty()) return emptyList()
 
@@ -45,7 +47,8 @@ object BubbleClusters {
             return r
         }
         for (i in usable.indices) for (j in i + 1 until usable.size) {
-            if (sameLettering(usable[i].box, usable[j].box)) {
+            val a = usable[i].box; val b = usable[j].box
+            if (sameLettering(a, b) && !(apart != null && isApart(a, b, apart))) {
                 val ri = find(i); val rj = find(j)
                 if (ri != rj) parent[ri] = rj
             }
@@ -97,6 +100,12 @@ object BubbleClusters {
             }
         }
         return rows
+    }
+
+    /** Stacked lines (no vertical overlap) that [apart] says belong to two bubbles. */
+    private fun isApart(a: Box, b: Box, apart: (Box, Box) -> Boolean): Boolean {
+        if (minOf(a.bottom, b.bottom) > maxOf(a.top, b.top)) return false // same text line
+        return if (a.top <= b.top) apart(a, b) else apart(b, a)
     }
 
     private fun sameLettering(a: Box, b: Box): Boolean {

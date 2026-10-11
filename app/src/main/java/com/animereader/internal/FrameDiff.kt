@@ -17,12 +17,19 @@ object FrameDiff {
 
     /**
      * Fraction [0..1] of grid cells whose luminance moved by more than [tolerance].
-     * A missing/mismatched previous grid counts as fully changed.
+     * A missing/mismatched previous grid counts as fully changed. Cells flagged in [ignore]
+     * (where our own translations are drawn) are left out; all ignored → unchanged.
      */
-    fun changedFraction(prev: IntArray?, cur: IntArray, tolerance: Int = 8): Double {
+    fun changedFraction(prev: IntArray?, cur: IntArray, tolerance: Int = 8, ignore: BooleanArray? = null): Double {
         if (prev == null || prev.size != cur.size || cur.isEmpty()) return 1.0
+        val skip = ignore?.takeIf { it.size == cur.size }
         var changed = 0
-        for (i in cur.indices) if (abs(cur[i] - prev[i]) > tolerance) changed++
-        return changed.toDouble() / cur.size
+        var counted = 0
+        for (i in cur.indices) {
+            if (skip != null && skip[i]) continue
+            counted++
+            if (abs(cur[i] - prev[i]) > tolerance) changed++
+        }
+        return if (counted == 0) 0.0 else changed.toDouble() / counted
     }
 }

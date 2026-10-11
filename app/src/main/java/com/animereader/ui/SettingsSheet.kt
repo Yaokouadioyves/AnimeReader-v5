@@ -86,6 +86,17 @@ fun SettingsSheet(
                     LangGridMini(settings.lang) { code -> onUpdate { it.copy(lang = code) } }
                 }
                 Divider()
+                Stacked(
+                    "Affichage de la traduction",
+                    if (settings.overlayMode) "Écrite sur chaque bulle quand la page s'arrête · disparaît dès que vous touchez l'écran"
+                    else "Pas affichée · la page reste en version originale (lecture à voix haute seulement)",
+                ) {
+                    Segment(
+                        options = listOf("Sur les bulles" to true, "Masquée" to false),
+                        selected = settings.overlayMode,
+                    ) { v -> onUpdate { it.copy(overlayMode = v) } }
+                }
+                Divider()
                 Stacked("Sens de lecture", "Ordre dans lequel les bulles d'une page sont lues") {
                     Segment(
                         options = listOf("Manga ←" to true, "BD, webtoon →" to false),
@@ -144,13 +155,6 @@ fun SettingsSheet(
                     Segment(options = Catalog.captureIntervals.map { "${it}s" to it }, selected = settings.captureInterval, compact = true) { v ->
                         onUpdate { it.copy(captureInterval = v) }
                     }
-                }
-                Divider()
-                Stacked("Taille des sous-titres", "Texte de la traduction affichée à l'écran") {
-                    Segment(
-                        options = listOf("Petit" to 0.85f, "Moyen" to 1f, "Grand" to 1.2f),
-                        selected = settings.captionScale, compact = true,
-                    ) { v -> onUpdate { it.copy(captionScale = v) } }
                 }
                 Divider()
                 Inline("Lecture automatique", "Démarrer dès qu'un texte est détecté") {

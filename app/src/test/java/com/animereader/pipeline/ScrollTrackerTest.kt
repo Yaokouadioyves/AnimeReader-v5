@@ -111,4 +111,130 @@ class ScrollTrackerTest {
         assertEquals(true, ScrollTracker.endsSentence("Quoi ?! »"))
         assertEquals(false, ScrollTracker.endsSentence("Je ne sais pas si"))
     }
+
+    @Test fun stillPageInOverlayModeReleasesEveryWholeBubbleAtOnce_butNeverTwice() {
+        val t = ScrollTracker()
+        val a = Seen("Tu crois vraiment que je vais te laisser partir ?", Edge.COMPLETE)
+        val b = Seen("Attends, je peux t'expliquer.", Edge.CUT_BOTTOM)    // ends a sentence
+        val c = Seen("Et puis", Edge.CUT_BOTTOM)                           // really cut
+        val d = Seen("la suite de la bulle", Edge.CUT_TOP)
+        val frame = listOf(d, a, b, c)
+        val first = t.onFrame(frame, still = true)            // seen once: nothing settled yet
+        assertEquals(emptyList<String>(), texts(first))
+        val flushed = t.flushStill(frame)
+        assertEquals(listOf(a.text, b.text), texts(flushed))
+        assertEquals(listOf(1, 2), flushed.map { it.index })
+        assertEquals(emptyList<String>(), texts(t.onFrame(frame, still = true) + t.flushStill(frame)))
+    }
+
+    // ── A bubble already read glued to the new one under it (grouped as one by the OCR) ──
+
+    @Test fun newBubbleGluedUnderAReadOneIsReadAlone() {
+        val t = ScrollTracker()
+        val old = Seen("Tu es sûr de vouloir y aller seul ?", Edge.COMPLETE)
+        t.onFrame(listOf(old), false); t.onFrame(listOf(old), false)       // read
+        val glued = Seen("Tu es sûr de vouloir y aller seul ? Oui, je n'ai plus le choix maintenant.", Edge.COMPLETE)
+        assertEquals(emptyList<String>(), texts(t.onFrame(listOf(glued), false))) // settling
+        val r = t.onFrame(listOf(glued), false)
+        assertEquals(listOf("Oui, je n'ai plus le choix maintenant."), texts(r))
+        assertNull(r[0].index) // no crop: it would show the old bubble too
+        assertEquals(emptyList<String>(), texts(t.onFrame(listOf(glued), true)))  // never twice
+    }
+
+    @Test fun shortNewBubbleGluedToALongReadOneIsNotSwallowed() {
+        // The glued text "contains" the old one at > 60 %: the plain duplicate test alone
+        // would have dropped the new bubble entirely.
+        val t = ScrollTracker()
+        val old = Seen("Je t'avais pourtant prévenu de ne jamais revenir ici, Kenji.", Edge.COMPLETE)
+        t.onFrame(listOf(old), false); t.onFrame(listOf(old), false)
+        val glued = Seen(old.text + " Pardon...", Edge.COMPLETE)
+        t.onFrame(listOf(glued), false)
+        assertEquals(listOf("Pardon..."), texts(t.onFrame(listOf(glued), false)))
+    }
+
+    @Test fun newBubbleStillCutAtTheBottomWaitsEvenWhenGlued() {
+        val t = ScrollTracker()
+        val old = Seen("On se retrouve demain matin.", Edge.COMPLETE)
+        t.onFrame(listOf(old), false); t.onFrame(listOf(old), false)
+        t.onFrame(listOf(Seen(old.text + " Pas question, je", Edge.CUT_BOTTOM)), false)
+        assertEquals(emptyList<String>(), texts(t.onFrame(listOf(Seen(old.text + " Pas question, je", Edge.CUT_BOTTOM)), false)))
+        val whole = Seen(old.text + " Pas question, je viens avec toi.", Edge.COMPLETE)
+        t.onFrame(listOf(whole), false)
+        assertEquals(listOf("Pas question, je viens avec toi."), texts(t.onFrame(listOf(whole), false)))
+    }
+
+    @Test fun readBubbleGluedAfterTheNewOneIsStrippedToo() {
+        val t = ScrollTracker()
+        val old = Seen("Qu'est-ce que tu fabriques encore ?", Edge.COMPLETE)
+        t.onFrame(listOf(old), false); t.onFrame(listOf(old), false)
+        val glued = Seen("Rien du tout, je range. " + old.text, Edge.COMPLETE)
+        t.onFrame(listOf(glued), false)
+        assertEquals(listOf("Rien du tout, je range."), texts(t.onFrame(listOf(glued), false)))
+    }
+
+    @Test fun anOcrCrumbNextToAReadBubbleIsNotRead() {
+        val t = ScrollTracker()
+        val old = Seen("Tu es sûr de vouloir y aller seul ?", Edge.COMPLETE)
+        t.onFrame(listOf(old), false); t.onFrame(listOf(old), false)
+        val crumb = Seen(old.text + " il", Edge.COMPLETE)
+        t.onFrame(listOf(crumb), false)
+        assertEquals(emptyList<String>(), texts(t.onFrame(listOf(crumb), false)))
+    }
+
+    @Test fun stillPageInOverlayModeDoesNotReReadAGluedBubble() {
+        val t = ScrollTracker()
+        val old = Seen("Tu es sûr de vouloir y aller seul ?", Edge.COMPLETE)
+        t.onFrame(listOf(old), false); t.onFrame(listOf(old), false)
+        val glued = Seen(old.text + " Oui, je n'ai plus le choix.", Edge.COMPLETE)
+        t.onFrame(listOf(glued), still = true)
+        assertEquals(listOf("Oui, je n'ai plus le choix."), texts(t.flushStill(listOf(glued))))
+    }
+
+    // ── The bubble just read must not have its last word read again ──
+
+    @Test fun bubbleStayingOnScreenIsNeverPartlyReadAgain() {
+        val t = ScrollTracker()
+        val b = Seen("Tu crois vraiment que je vais te laisser partir ?", Edge.COMPLETE)
+        t.onFrame(listOf(b), still = false)
+        assertEquals(listOf(b.text), texts(t.onFrame(listOf(b), still = false)))
+        repeat(5) { assertEquals(emptyList<String>(), texts(t.onFrame(listOf(b), still = it > 1))) }
+        assertEquals(emptyList<String>(), texts(t.flushStill(listOf(b))))
+    }
+
+    @Test fun ocrSlipOnTheLastWordIsNotANewBubble() {
+        val t = ScrollTracker()
+        val b = Seen("Je ne te laisserai jamais faire une chose pareille, Kenji !", Edge.COMPLETE)
+        t.onFrame(listOf(b), false); t.onFrame(listOf(b), false)
+        val slips = listOf(
+            "Je ne te laisserai jamais faire une chose pareille, Kenjl !",
+            "Je ne te laisserai jamais faire une chose pareille. Kenji",
+            "Je ne te laisserai jamais faire une chose pareille, Ken ji !",
+        )
+        for (txt in slips) {
+            val s = Seen(txt, Edge.COMPLETE)
+            assertEquals(txt, emptyList<String>(), texts(t.onFrame(listOf(s), false)))
+            assertEquals(txt, emptyList<String>(), texts(t.onFrame(listOf(s), true)))
+            assertEquals(txt, emptyList<String>(), texts(t.flushStill(listOf(s))))
+        }
+    }
+
+    @Test fun pageStoppingRightAfterAReadDoesNotRepeatItsEnd() {
+        val t = ScrollTracker()
+        val b = Seen("On y va maintenant, sinon on va rater le dernier train.", Edge.COMPLETE)
+        t.onFrame(listOf(b), false)
+        assertEquals(listOf(b.text), texts(t.onFrame(listOf(b), false)))
+        // The page stops: overlay mode flushes the still capture.
+        val ready = t.onFrame(listOf(b), true) + t.flushStill(listOf(b))
+        assertEquals(emptyList<String>(), texts(ready))
+    }
+
+    @Test fun newBubbleGluedUnderTheReadOneIsStillRead() {
+        val t = ScrollTracker()
+        val a = Seen("Tu es sûr de vouloir y aller seul ?", Edge.COMPLETE)
+        t.onFrame(listOf(a), false); t.onFrame(listOf(a), false)
+        val glued = Seen("Tu es sûr de vouloir y aller seul ? Oui, je n'ai plus le choix.", Edge.COMPLETE)
+        t.onFrame(listOf(glued), false)
+        assertEquals(listOf("Oui, je n'ai plus le choix."), texts(t.onFrame(listOf(glued), false)))
+        repeat(3) { assertEquals(emptyList<String>(), texts(t.onFrame(listOf(glued), true))) }
+    }
 }
