@@ -651,20 +651,23 @@ class OverlayService : LifecycleService() {
         val pieces = runCatching { ocr.recognize(bmp) }.getOrDefault(emptyList())
         // Our own translations, if a capture caught them just before they vanished.
         val echo = recentOverlay.takeIf { System.currentTimeMillis() - it.first < ECHO_MEMORY_MS }?.second.orEmpty()
+        var grid: BubbleEdges.Grid? = null // built only when the outlines are needed
+        fun grid() = grid ?: edgeGrid(bmp).also { grid = it }
         val bubbles = BubbleClusters.readingOrder(
-            BubbleClusters.clusterLines(pieces.filterNot { ScanText.isWatermark(it.text) })
+            BubbleClusters.clusterLines(
+                pieces.filterNot { ScanText.isWatermark(it.text) },
+                apart = { upper, lower -> BubbleEdges.separated(grid(), upper, lower) },
+            )
                 .map { it.copy(text = ScanText.polish(it.text)) }
                 .filterNot { ScanText.isNoise(it.text) }
                 .filterNot { echo.isNotEmpty() && TextDedup.isDuplicate(TextDedup.normalize(it.text), echo, 0.75) },
             rtl = settings.readingRtl,
         )
-        var grid: BubbleEdges.Grid? = null // built only when some text comes near an edge
         return bubbles.map { b ->
             val near = BubbleEdges.nearTop(b.box, b.lineHeight) ||
                 BubbleEdges.nearBottom(b.box, b.lineHeight, bmp.height)
             val outline = if (near) {
-                val g = grid ?: edgeGrid(bmp).also { grid = it }
-                BubbleEdges.probe(g, b.box)
+                BubbleEdges.probe(grid(), b.box)
             } else null
             FrameBubble(b, BubbleEdges.classify(b.box, b.lineHeight, bmp.height, outline))
         }
