@@ -318,6 +318,9 @@ class OverlayService : LifecycleService() {
         PixelFormat.TRANSLUCENT,
     ).apply { gravity = Gravity.TOP or Gravity.START }
 
+    private fun withAlpha(color: Int, alpha: Int): Int =
+        AColor.argb(alpha, AColor.red(color), AColor.green(color), AColor.blue(color))
+
     private fun accentInt(): Int {
         val pal = resolvePalette(settings.direction, settings.mode, settings.accent)
         return pal.accent.toArgb()
@@ -344,16 +347,19 @@ class OverlayService : LifecycleService() {
 
         // Bubble
         val b = FrameLayout(this).apply {
-            background = GradientDrawable().apply { shape = GradientDrawable.OVAL; setColor(accentInt()) }
+            background = GradientDrawable().apply {
+                shape = GradientDrawable.OVAL; setColor(accentInt())
+                setStroke(dp(2), AColor.argb(90, 255, 255, 255))
+            }
             addView(ImageView(this@OverlayService).apply {
-                setImageResource(R.drawable.ic_target)
-                val pad = dp(13); setPadding(pad, pad, pad, pad)
+                setImageResource(R.drawable.ic_bubble_logo)
+                val pad = dp(9); setPadding(pad, pad, pad, pad)
             })
-            elevation = dp(8).toFloat()
+            elevation = dp(5).toFloat()
         }
-        val bp = overlayParams(dp(56), dp(56), touchable = true).apply {
-            x = if (s.bubbleX >= 0) s.bubbleX.coerceIn(0, (w - dp(56)).coerceAtLeast(0)) else w - dp(72)
-            y = if (s.bubbleY >= 0) s.bubbleY.coerceIn(0, (h - dp(56)).coerceAtLeast(0)) else (h * 0.55f).toInt()
+        val bp = overlayParams(dp(BUBBLE_DP), dp(BUBBLE_DP), touchable = true).apply {
+            x = if (s.bubbleX >= 0) s.bubbleX.coerceIn(0, (w - dp(BUBBLE_DP)).coerceAtLeast(0)) else w - dp(BUBBLE_DP + 14)
+            y = if (s.bubbleY >= 0) s.bubbleY.coerceIn(0, (h - dp(BUBBLE_DP)).coerceAtLeast(0)) else (h * 0.55f).toInt()
         }
         attachBubbleTouch(b, bp)
         wm.addView(b, bp); bubble = b; bubbleLp = bp
@@ -391,8 +397,8 @@ class OverlayService : LifecycleService() {
 
         // Control dock at the bottom
         controls = buildControls().also {
-            wm.addView(it, overlayParams(WindowManager.LayoutParams.MATCH_PARENT, WindowManager.LayoutParams.WRAP_CONTENT, true).apply {
-                gravity = Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL; y = dp(24)
+            wm.addView(it, overlayParams(WindowManager.LayoutParams.WRAP_CONTENT, WindowManager.LayoutParams.WRAP_CONTENT, true).apply {
+                gravity = Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL; y = dp(14)
             })
         }
 
@@ -422,21 +428,23 @@ class OverlayService : LifecycleService() {
         val dock = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
-            setPadding(dp(6), dp(6), dp(6), dp(6))
+            setPadding(dp(4), dp(4), dp(6), dp(4))
+            // Slightly see-through glass pill: the page stays readable behind it.
             background = GradientDrawable().apply {
-                cornerRadius = dp(999).toFloat(); setColor(elevInt()); setStroke(dp(1), borderInt())
+                cornerRadius = dp(999).toFloat(); setColor(withAlpha(elevInt(), 232))
+                setStroke(dp(1), withAlpha(borderInt(), 150))
             }
-            elevation = dp(6).toFloat()
+            elevation = dp(4).toFloat()
         }
         // Play / pause — accent circle
         playImg = ImageView(this).apply {
             setImageResource(R.drawable.ic_play); setColorFilter(onAccentInt())
-            val p = dp(12); setPadding(p, p, p, p)
+            val p = dp(8); setPadding(p, p, p, p)
             background = GradientDrawable().apply { shape = GradientDrawable.OVAL; setColor(accentInt()) }
         }
         dock.addView(FrameLayout(this).apply {
-            layoutParams = LinearLayout.LayoutParams(dp(44), dp(44))
-            addView(playImg, FrameLayout.LayoutParams(dp(44), dp(44)))
+            layoutParams = LinearLayout.LayoutParams(dp(DOCK_BTN_DP), dp(DOCK_BTN_DP)).apply { rightMargin = dp(2) }
+            addView(playImg, FrameLayout.LayoutParams(dp(DOCK_BTN_DP), dp(DOCK_BTN_DP)))
             setOnClickListener { togglePlay() }
         })
         // re-read the current bubble on demand (bypasses the de-dup)
@@ -450,24 +458,24 @@ class OverlayService : LifecycleService() {
         // Language pill — tap opens the language dropdown
         val langPill = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL
-            setPadding(dp(11), dp(7), dp(9), dp(7))
+            setPadding(dp(8), dp(4), dp(4), dp(4))
             background = GradientDrawable().apply { cornerRadius = dp(999).toFloat(); setColor(AColor.TRANSPARENT) }
             setOnClickListener { toggleLangPopup() }
         }
         methodDot = View(this).apply {
-            layoutParams = LinearLayout.LayoutParams(dp(7), dp(7)).apply { rightMargin = dp(7) }
+            layoutParams = LinearLayout.LayoutParams(dp(6), dp(6)).apply { rightMargin = dp(5) }
             background = GradientDrawable().apply { shape = GradientDrawable.OVAL; setColor(methodColorInt()) }
         }
         langPill.addView(methodDot)
         langBtn = TextView(this).apply {
             text = Catalog.lang(settings.lang).tag
-            setTextColor(textInt()); setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
+            setTextColor(textInt()); setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
             typeface = android.graphics.Typeface.DEFAULT_BOLD
         }
         langPill.addView(langBtn)
         langPill.addView(ImageView(this).apply {
             setImageResource(R.drawable.ic_chevron_down); setColorFilter(textMutedInt())
-            layoutParams = LinearLayout.LayoutParams(dp(15), dp(15)).apply { leftMargin = dp(2) }
+            layoutParams = LinearLayout.LayoutParams(dp(13), dp(13)).apply { leftMargin = dp(1) }
         })
         dock.addView(langPill)
         // Voice on/off — off = translate-only (no audio)
@@ -480,14 +488,14 @@ class OverlayService : LifecycleService() {
     }
 
     private fun dockSep() = View(this).apply {
-        layoutParams = LinearLayout.LayoutParams(dp(1), dp(26)).apply { leftMargin = dp(3); rightMargin = dp(3) }
-        setBackgroundColor(borderInt())
+        layoutParams = LinearLayout.LayoutParams(dp(1), dp(16)).apply { leftMargin = dp(4); rightMargin = dp(2) }
+        setBackgroundColor(withAlpha(borderInt(), 170))
     }
 
     private fun dockIcon(res: Int, tint: Int, onClick: () -> Unit): ImageView = ImageView(this).apply {
         setImageResource(res); setColorFilter(tint)
-        val p = dp(10); setPadding(p, p, p, p)
-        layoutParams = LinearLayout.LayoutParams(dp(40), dp(40))
+        val p = dp(8); setPadding(p, p, p, p)
+        layoutParams = LinearLayout.LayoutParams(dp(DOCK_BTN_DP), dp(DOCK_BTN_DP))
         background = GradientDrawable().apply { shape = GradientDrawable.OVAL; setColor(AColor.TRANSPARENT) }
         setOnClickListener { onClick() }
     }
@@ -552,7 +560,7 @@ class OverlayService : LifecycleService() {
         runCatching {
             wm.addView(scrim, overlayParams(WindowManager.LayoutParams.MATCH_PARENT, WindowManager.LayoutParams.MATCH_PARENT, touchable = true))
             wm.addView(pop, overlayParams(WindowManager.LayoutParams.WRAP_CONTENT, WindowManager.LayoutParams.WRAP_CONTENT, touchable = true).apply {
-                gravity = Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL; y = dp(84)
+                gravity = Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL; y = dp(60)
             })
         }
     }
@@ -1145,6 +1153,9 @@ class OverlayService : LifecycleService() {
         private const val ECHO_MEMORY_MS = 3000L
         /** Smallest text size of a drawn translation. */
         private const val OVERLAY_MIN_SP = 10f
+        /** Floating bubble diameter and dock button size (dp). */
+        private const val BUBBLE_DP = 46
+        private const val DOCK_BTN_DP = 34
         /** Highest window opacity Android 12+ still lets touches pass through. */
         private const val MAX_PASS_THROUGH_ALPHA = 0.8f
 
