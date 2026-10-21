@@ -58,8 +58,11 @@ fun SettingsSheet(
 
     val methodSub = if (settings.method == TranslationMethod.OFFLINE) "ML Kit — sur l'appareil"
         else "Google Traduction (sans clé) · Gemini ou Mistral si une clé est saisie"
-    val voiceSub = if (settings.voiceMethod == VoiceMethod.OFFLINE) "Moteur TTS de l'appareil"
-        else "Voix neurales Microsoft, sans clé · repli sur la voix de l'appareil"
+    val voiceSub = when (settings.voiceMethod) {
+        VoiceMethod.OFFLINE -> "Moteur TTS de l'appareil"
+        VoiceMethod.PHONON -> "Voix neurale Phonon calculée sur le téléphone, sans réseau · bulles en français"
+        VoiceMethod.ONLINE -> "Voix neurales Microsoft, sans clé · repli sur Phonon puis la voix de l'appareil"
+    }
 
     ModalBottomSheet(onDismissRequest = onClose, sheetState = sheetState, containerColor = pal.elev) {
         Column(
@@ -115,9 +118,15 @@ fun SettingsSheet(
                 if (settings.ttsEnabled) {
                     Stacked("Synthèse vocale", voiceSub) {
                         Segment(
-                            options = listOf("Hors-ligne" to VoiceMethod.OFFLINE, "IA en ligne" to VoiceMethod.ONLINE),
+                            options = listOf("Appareil" to VoiceMethod.OFFLINE, "Phonon" to VoiceMethod.PHONON, "En ligne" to VoiceMethod.ONLINE),
                             selected = settings.voiceMethod,
-                        ) { v -> onUpdate { it.copy(voiceMethod = v) } }
+                        ) { v ->
+                            // Phonon's default voice is Augustin (the « Masculine » timbre).
+                            onUpdate {
+                                if (v == VoiceMethod.PHONON && it.voiceMethod != v) it.copy(voiceMethod = v, timbre = "Masculine")
+                                else it.copy(voiceMethod = v)
+                            }
+                        }
                     }
                     Divider()
                     Inline("Vitesse de lecture", null) {
@@ -134,9 +143,11 @@ fun SettingsSheet(
                     Divider()
                     Stacked(
                         "Timbre",
-                        if (settings.voiceMethod == VoiceMethod.ONLINE)
-                            "Féminine / Masculine : voix récentes, plus naturelles · Neutre : voix classique"
-                        else null,
+                        when (settings.voiceMethod) {
+                            VoiceMethod.ONLINE -> "Féminine / Masculine : voix récentes, plus naturelles · Neutre : voix classique"
+                            VoiceMethod.PHONON -> "Masculine / Neutre : Augustin · Féminine : Noémie"
+                            VoiceMethod.OFFLINE -> null
+                        },
                     ) {
                         Segment(options = Catalog.timbres.map { it to it }, selected = settings.timbre, compact = true) { v ->
                             onUpdate { it.copy(timbre = v) }
@@ -210,6 +221,13 @@ fun SettingsSheet(
                         )
                     }
                     Text("Rechercher", color = pal.accent, fontSize = fs(13f), fontWeight = FontWeight.Bold)
+                }
+                Divider()
+                Column(Modifier.fillMaxWidth().padding(vertical = 14.dp)) {
+                    LabelText(
+                        "Crédits",
+                        "Voix Phonon © Gradium (gradium.ai/phonon), licence CC BY-NC 4.0 : usage non commercial",
+                    )
                 }
             }
 

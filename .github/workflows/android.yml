@@ -12,6 +12,10 @@ permissions:
 jobs:
   build:
     runs-on: ubuntu-latest
+    env:
+      # Offline voice: Gradium's Phonon runtime (github.com/gradium-ai/xn-ptts) and the model files.
+      PTTS_VERSION: v0.4.0
+      PHONON_MODEL_RELEASE: phonon-fr-40m-1
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -28,6 +32,46 @@ jobs:
         uses: android-actions/setup-android@v3
         with:
           packages: 'platform-tools'
+
+      # libptts_ffi.so has no prebuilt Android package: build it (arm64, same flags as the
+      # project's android/build.sh) once per Phonon version and keep it in the cache.
+      - name: Cache the Phonon native library
+        id: phonon-lib
+        uses: actions/cache@v4
+        with:
+          path: app/src/main/jniLibs
+          key: ptts-ffi-${{ env.PTTS_VERSION }}-arm64-dotprod-fp16
+
+      - name: Build the Phonon native library
+        if: steps.phonon-lib.outputs.cache-hit != 'true'
+        run: |
+          git clone --depth 1 --branch "$PTTS_VERSION" https://github.com/gradium-ai/xn-ptts.git "$RUNNER_TEMP/xn-ptts"
+          rustup target add aarch64-linux-android
+          cargo install cargo-ndk --locked
+          export ANDROID_NDK_HOME="${ANDROID_NDK_LATEST_HOME:-$ANDROID_NDK_HOME}"
+          # Replace the repository's target-cpu=native (the build machine) with the phone's features.
+          export CARGO_TARGET_AARCH64_LINUX_ANDROID_RUSTFLAGS="-C strip=symbols -C link-arg=-Wl,-z,max-page-size=16384 -C target-cpu=generic -C target-feature=+dotprod,+fp16"
+          unset RUSTFLAGS CARGO_ENCODED_RUSTFLAGS
+          cd "$RUNNER_TEMP/xn-ptts"
+          cargo ndk -t arm64-v8a -o "$GITHUB_WORKSPACE/app/src/main/jniLibs" build --release -p ptts-ffi
+          ls -la "$GITHUB_WORKSPACE/app/src/main/jniLibs/arm64-v8a"
+
+      # Phonon 40m French + the Augustin and Noémie voices (© Gradium, CC BY-NC 4.0), hosted
+      # unmodified on a pre-release of this repository (the Hugging Face repo needs a login).
+      - name: Fetch the Phonon model
+        run: |
+          base="https://github.com/${GITHUB_REPOSITORY}/releases/download/${PHONON_MODEL_RELEASE}"
+          tmp="$RUNNER_TEMP/phonon"; mkdir -p "$tmp"
+          for f in config.json tokenizer.json model.q8.gguf voice-Augustin.safetensors voice-Noemie.safetensors SHA256SUMS; do
+            curl -fsSL --retry 3 -o "$tmp/$f" "$base/$f"
+          done
+          (cd "$tmp" && sha256sum -c SHA256SUMS)
+          d=app/src/main/assets/phonon
+          mkdir -p "$d/voices"
+          mv "$tmp/config.json" "$tmp/tokenizer.json" "$tmp/model.q8.gguf" "$d/"
+          mv "$tmp/voice-Augustin.safetensors" "$d/voices/Augustin.safetensors"
+          mv "$tmp/voice-Noemie.safetensors" "$d/voices/Noemie.safetensors"
+          ls -laR "$d"
 
       - name: Set up Gradle 8.9
         uses: gradle/actions/setup-gradle@v4

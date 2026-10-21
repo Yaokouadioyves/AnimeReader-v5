@@ -16,7 +16,11 @@ enum class TextProvider(val displayName: String, val org: String) {
 }
 
 /** Voice (TTS) backend. */
-enum class VoiceMethod { OFFLINE, ONLINE }
+enum class VoiceMethod {
+    OFFLINE, // device TTS
+    ONLINE,  // Edge neural voice
+    PHONON,  // bundled offline neural voice (French)
+}
 
 /** Online voice providers. */
 enum class VoiceProviderId(val displayName: String, val org: String) {

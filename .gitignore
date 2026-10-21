@@ -10,3 +10,7 @@
 .cxx/
 *.apk
 *.keystore
+
+# Offline Phonon voice: native library and model files are fetched/built by CI (see android.yml)
+/app/src/main/jniLibs/
+/app/src/main/assets/phonon/

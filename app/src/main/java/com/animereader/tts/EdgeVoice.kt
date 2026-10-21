@@ -35,11 +35,12 @@ import java.io.ByteArrayOutputStream
  *
  * Robustness: endpoints are tried in order ([EdgeProtocol.HOSTS]), a 403 caused by a skewed
  * phone clock is corrected from the server's Date header, and any failure falls back to the
- * device voice for that line. PERSONAL USE — for commercial, swap to on-device or a paid provider.
+ * fallback voice for that line
+ * (Phonon when bundled, else the device voice). PERSONAL USE — for commercial, swap to on-device or a paid provider.
  */
 class EdgeVoice(
     private val context: Context,
-    private val fallback: DeviceTts,
+    private val fallback: VoiceProvider,
 ) : VoiceProvider {
 
     var onSpeechDone: ((String?) -> Unit)? = null

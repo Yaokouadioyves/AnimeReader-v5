@@ -70,6 +70,7 @@ import com.animereader.translate.GoogleWebTranslator
 import com.animereader.translate.Translators
 import com.animereader.tts.DeviceTts
 import com.animereader.tts.EdgeVoice
+import com.animereader.tts.PhononVoice
 import com.animereader.tts.SpeechItem
 import com.animereader.tts.SpeechQueue
 import com.animereader.tts.SpeechText
@@ -114,6 +115,7 @@ class OverlayService : LifecycleService() {
     private lateinit var ocr: ScreenOcr
     private lateinit var deviceTts: DeviceTts
     private lateinit var edgeVoice: EdgeVoice
+    private lateinit var phononVoice: PhononVoice
     private lateinit var reader: BubbleReader
     private lateinit var speech: SpeechQueue
     private val apiKeys = ApiKeys()
@@ -180,7 +182,13 @@ class OverlayService : LifecycleService() {
         ocr = ScreenOcr()
         deviceTts = DeviceTts(this)
         deviceTts.onSpeechDone = { id -> onUtteranceDone(id) }
-        edgeVoice = EdgeVoice(this, deviceTts)
+        phononVoice = PhononVoice(this, deviceTts)
+        phononVoice.onSpeechDone = { id -> onUtteranceDone(id) }
+        phononVoice.onError = { msg ->
+            ui.post { android.widget.Toast.makeText(this, "Voix Phonon ⚠️ $msg", android.widget.Toast.LENGTH_LONG).show() }
+        }
+        // Edge failing (no network, endpoint down) → the offline neural voice, then the device one.
+        edgeVoice = EdgeVoice(this, phononVoice)
         edgeVoice.onSpeechDone = { id -> onUtteranceDone(id) }
         edgeVoice.onError = { msg ->
             ui.post { android.widget.Toast.makeText(this, "Voix en ligne ⚠️ $msg", android.widget.Toast.LENGTH_LONG).show() }
@@ -212,8 +220,11 @@ class OverlayService : LifecycleService() {
         speech = SpeechQueue(
             scope = lifecycleScope,
             speak = { item ->
-                val provider: VoiceProvider =
-                    if (settings.voiceMethod == VoiceMethod.ONLINE) edgeVoice else deviceTts
+                val provider: VoiceProvider = when (settings.voiceMethod) {
+                    VoiceMethod.ONLINE -> edgeVoice
+                    VoiceMethod.PHONON -> phononVoice
+                    VoiceMethod.OFFLINE -> deviceTts
+                }
                 provider.speak(item.text, item.langTag, item.rate, item.timbre)
             },
             onItemStart = { item ->
@@ -226,8 +237,11 @@ class OverlayService : LifecycleService() {
             },
             // Synthesize the next bubbles while the current one plays → no gap between them.
             prefetch = { item ->
-                if (settings.voiceMethod == VoiceMethod.ONLINE)
-                    edgeVoice.prefetch(item.text, item.langTag, item.rate, item.timbre)
+                when (settings.voiceMethod) {
+                    VoiceMethod.ONLINE -> edgeVoice.prefetch(item.text, item.langTag, item.rate, item.timbre)
+                    VoiceMethod.PHONON -> phononVoice.prefetch(item.text, item.langTag, item.rate, item.timbre)
+                    VoiceMethod.OFFLINE -> {}
+                }
             },
         )
         lifecycleScope.launch {
@@ -585,6 +599,7 @@ class OverlayService : LifecycleService() {
     private fun stopSpeaking() {
         deviceTts.stop()
         if (::edgeVoice.isInitialized) edgeVoice.stop()
+        if (::phononVoice.isInitialized) phononVoice.stop()
     }
 
     /** Re-read whatever is currently in the rectangle, ignoring the de-dup memory. */
@@ -1027,6 +1042,8 @@ class OverlayService : LifecycleService() {
         val s = settings
         // Open the voice socket now so its ~0.7 s handshake overlaps the OCR/translation wait.
         if (s.ttsEnabled && s.voiceMethod == VoiceMethod.ONLINE) edgeVoice.prewarm()
+        // Load the offline model during the OCR wait too (only the first page pays the load).
+        if (s.ttsEnabled && s.voiceMethod == VoiceMethod.PHONON) phononVoice.prewarm()
 
         val lines = reader.readPage(page, TargetLang(s.lang, langName(s.lang)))
         for (line in lines) {
@@ -1125,7 +1142,7 @@ class OverlayService : LifecycleService() {
         listOfNotNull(bubble, frame, touchWatcher, moveHandle, sizeHandle, controls, langPopup, langScrim).forEach { runCatching { wm.removeView(it) } }
         capturer?.stop()
         runCatching { projection?.stop() }
-        ocr.close(); deviceTts.shutdown(); edgeVoice.shutdown()
+        ocr.close(); deviceTts.shutdown(); edgeVoice.shutdown(); phononVoice.shutdown()
         super.onDestroy()
     }
 

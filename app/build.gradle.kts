@@ -65,6 +65,11 @@ android {
     lint {
         checkReleaseBuilds = false
     }
+    // The Phonon model (assets/phonon, ~75 MB, fetched by CI) is copied out once at first use:
+    // stored uncompressed it copies quickly and doesn't slow the build down.
+    androidResources {
+        noCompress += listOf("gguf", "safetensors")
+    }
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
@@ -97,6 +102,8 @@ dependencies {
     implementation(libs.mlkit.text.recognition)
     implementation(libs.mlkit.translate)
     implementation(libs.okhttp)
+    // Calls libptts_ffi.so (offline Phonon voice, built by CI into src/main/jniLibs).
+    implementation("net.java.dev.jna:jna:5.17.0@aar")
 
     testImplementation("junit:junit:4.13.2")
     // Real org.json for JVM unit tests (the android.jar one is a stub that throws).
